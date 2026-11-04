@@ -11,19 +11,54 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.androgrid.v1.NetworkTransportType
+import com.androgrid.v1.RegisterNodeRequest
+import com.androgrid.v1.SyncNodeStateRequest
+import com.androgrid.v1.TaskExecutionReport
+import com.androgrid.v1.TaskState
+import com.androgrid.worker.capability.AndroidSystemInfoProvider
+import com.androgrid.worker.capability.DeviceCapabilityProvider
+import com.androgrid.worker.capability.StandardRootChecker
+import com.androgrid.worker.engine.TaskExecutionDispatcher
+import com.androgrid.worker.network.WifiSyncClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * Android Foreground Service executing Wi-Fi state synchronization.
  * Bifurcates lifecycle between API 34+ typed foreground service and legacy fallbacks.
+ * Executes declarative synchronization loop every 2.0 seconds ([REQ-OP-002]).
  *
- * Traces to: [REQ-OP-002], [REQ-VER-001], [INV-001]
+ * Traces to: [REQ-OP-001], [REQ-OP-002], [REQ-VER-001], [INV-001]
  */
 class WorkerForegroundService : Service() {
 
     companion object {
         const val NOTIFICATION_ID: Int = 1001
         const val CHANNEL_ID: String = "androgrid_worker_sync_channel"
+
+        const val ACTION_START_SYNC: String = "com.androgrid.worker.action.START_SYNC"
+        const val ACTION_STOP_SYNC: String = "com.androgrid.worker.action.STOP_SYNC"
+
+        /**
+         * Declarative Wi-Fi synchronization interval in milliseconds (2.0s).
+         * Traces to: [REQ-OP-002]
+         */
+        const val SYNC_INTERVAL_MS: Long = 2000L
     }
+
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+    private var syncJob: Job? = null
+
+    private var wifiClient: WifiSyncClient? = null
+    private val completedReports = ConcurrentLinkedQueue<TaskExecutionReport>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -33,6 +68,31 @@ class WorkerForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action ?: ACTION_START_SYNC
+
+        when (action) {
+            ACTION_STOP_SYNC -> {
+                stopSyncLoop()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_START_SYNC -> {
+                startForegroundWithTypedNotification()
+                startSyncLoop()
+            }
+        }
+
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopSyncLoop()
+        serviceJob.cancel()
+    }
+
+    private fun startForegroundWithTypedNotification() {
         val notification = buildForegroundNotification()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -48,8 +108,88 @@ class WorkerForegroundService : Service() {
             // Legacy fallback for API Level 28 to 33
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
 
-        return START_STICKY
+    private fun startSyncLoop() {
+        if (syncJob?.isActive == true) return
+
+        syncJob = serviceScope.launch {
+            val rootChecker = StandardRootChecker()
+            val systemInfo = AndroidSystemInfoProvider(applicationContext)
+            val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
+            val dispatcher = TaskExecutionDispatcher()
+
+            val client = WifiSyncClient(host = "192.168.1.100", port = 50051)
+            wifiClient = client
+
+            val nodeId = "node_${Build.SERIAL.takeIf { it != "unknown" } ?: "android_wifi_worker"}"
+            val capabilities = capabilityProvider.buildCapabilities(
+                currentTransport = NetworkTransportType.NETWORK_TRANSPORT_WIFI_LAN,
+                isMetered = false
+            )
+
+            // Step 1: Register node per [REQ-OP-001]
+            val regRequest = RegisterNodeRequest.newBuilder()
+                .setNodeId(nodeId)
+                .setCapabilities(capabilities)
+                .setClientVersion("0.1.0")
+                .build()
+
+            val regResult = client.registerNode(regRequest)
+            if (regResult.isFailure) {
+                // If registration fails, wait before retry
+                delay(SYNC_INTERVAL_MS)
+                return@launch
+            }
+
+            var sessionToken = regResult.getOrNull()?.sessionToken ?: ""
+
+            // Step 2: 2.0-second declarative synchronization loop per [REQ-OP-002]
+            while (isActive) {
+                val reportsToSend = mutableListOf<TaskExecutionReport>()
+                while (completedReports.isNotEmpty()) {
+                    completedReports.poll()?.let { reportsToSend.add(it) }
+                }
+
+                val syncRequest = SyncNodeStateRequest.newBuilder()
+                    .setNodeId(nodeId)
+                    .setSessionToken(sessionToken)
+                    .addAllCompletedTasks(reportsToSend)
+                    .build()
+
+                val syncResult = client.syncNodeState(syncRequest)
+                if (syncResult.isSuccess) {
+                    val response = syncResult.getOrNull()
+                    response?.desiredTasksList?.forEach { desiredTask ->
+                        // Dispatch assigned task concurrently in background
+                        launch {
+                            val result = dispatcher.dispatch(desiredTask)
+                            val report = result.toTaskExecutionReport(
+                                taskId = desiredTask.taskId,
+                                runAttempt = desiredTask.runAttempt,
+                                state = if (result.exitCode == 0) {
+                                    TaskState.TASK_STATE_COMPLETED
+                                } else {
+                                    TaskState.TASK_STATE_FAILED
+                                }
+                            )
+                            completedReports.add(report)
+                        }
+                    }
+                }
+
+                delay(SYNC_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopSyncLoop() {
+        syncJob?.cancel()
+        syncJob = null
+        serviceScope.launch {
+            wifiClient?.shutdown(500L)
+            wifiClient = null
+        }
     }
 
     private fun buildForegroundNotification(): Notification {

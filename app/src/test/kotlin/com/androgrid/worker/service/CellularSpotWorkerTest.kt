@@ -1,0 +1,268 @@
+package com.androgrid.worker.service
+
+import androidx.work.ListenableWorker
+import com.androgrid.v1.ClaimCellularTaskRequest
+import com.androgrid.v1.ClaimCellularTaskResponse
+import com.androgrid.v1.ExecutionEngine
+import com.androgrid.v1.SubmitCellularResultRequest
+import com.androgrid.v1.SubmitCellularResultResponse
+import com.androgrid.v1.TaskSpec
+import com.androgrid.worker.capability.BatteryStatus
+import com.androgrid.worker.capability.BatteryStatusProvider
+import com.androgrid.worker.capability.DeviceCapabilityProvider
+import com.androgrid.worker.capability.RootChecker
+import com.androgrid.worker.capability.SystemInfoProvider
+import com.androgrid.worker.engine.ComputeEngine
+import com.androgrid.worker.engine.TaskExecutionDispatcher
+import com.androgrid.worker.engine.TaskExecutionResult
+import com.androgrid.worker.network.CellularRpcInvoker
+import com.androgrid.worker.network.CellularTransportClient
+import com.google.common.truth.Truth.assertThat
+import com.google.protobuf.ByteString
+import io.grpc.ManagedChannel
+import io.grpc.Status
+import io.grpc.StatusRuntimeException
+import kotlinx.coroutines.test.runTest
+import org.junit.Test
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * Unit tests for Cellular Background Spot Worker lifecycle and battery preconditions.
+ *
+ * Traces to: [INV-001], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001]
+ */
+class CellularSpotWorkerTest {
+
+    private class MockChannel : ManagedChannel() {
+        val shutdownCalled = AtomicBoolean(false)
+        override fun shutdown(): ManagedChannel = this
+        override fun shutdownNow(): ManagedChannel {
+            shutdownCalled.set(true)
+            return this
+        }
+        override fun isShutdown(): Boolean = shutdownCalled.get()
+        override fun isTerminated(): Boolean = shutdownCalled.get()
+        override fun awaitTermination(timeout: Long, unit: TimeUnit): Boolean = true
+        override fun authority(): String = "localhost:443"
+        override fun <RequestT : Any?, ResponseT : Any?> newCall(
+            methodDescriptor: io.grpc.MethodDescriptor<RequestT, ResponseT>?,
+            callOptions: io.grpc.CallOptions?
+        ): io.grpc.ClientCall<RequestT, ResponseT> {
+            throw UnsupportedOperationException()
+        }
+    }
+
+    private class FakeBatteryProvider(private var status: BatteryStatus) : BatteryStatusProvider {
+        fun setStatus(newStatus: BatteryStatus) {
+            status = newStatus
+        }
+        override fun getBatteryStatus(): BatteryStatus = status
+    }
+
+    private class FakeRootChecker : RootChecker {
+        override fun isDeviceRooted(): Boolean = false
+    }
+
+    private class FakeSystemInfo : SystemInfoProvider {
+        override fun availableProcessors(): Int = 4
+        override fun totalMemoryBytes(): Long = 4L * 1024L * 1024L * 1024L
+        override fun osVersion(): String = "14"
+        override fun supportedAbi(): String = "arm64-v8a"
+    }
+
+    private class FakeCellularRpc(
+        var claimResponse: Result<ClaimCellularTaskResponse>,
+        var submitResponse: Result<SubmitCellularResultResponse> = Result.success(
+            SubmitCellularResultResponse.newBuilder().setAccepted(true).build()
+        )
+    ) : CellularRpcInvoker {
+        var lastClaimRequest: ClaimCellularTaskRequest? = null
+        var lastSubmitRequest: SubmitCellularResultRequest? = null
+
+        override suspend fun invokeClaim(
+            channel: ManagedChannel,
+            request: ClaimCellularTaskRequest
+        ): ClaimCellularTaskResponse {
+            lastClaimRequest = request
+            return claimResponse.getOrThrow()
+        }
+
+        override suspend fun invokeSubmit(
+            channel: ManagedChannel,
+            request: SubmitCellularResultRequest
+        ): SubmitCellularResultResponse {
+            lastSubmitRequest = request
+            return submitResponse.getOrThrow()
+        }
+    }
+
+    private class EchoEngine : ComputeEngine {
+        var executedTask: TaskSpec? = null
+
+        override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+            executedTask = task
+            return TaskExecutionResult.success(
+                stdoutBytes = "computation output for ${task.taskId}".toByteArray(),
+                durationMs = 50L
+            )
+        }
+    }
+
+    @Test
+    fun testLowBatteryWithoutCharging_skipsClaim() = runTest {
+        // Enforces [REQ-OP-003]: battery level >= 20% or charging
+        val batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 15, isCharging = false))
+        val rpc = FakeCellularRpc(Result.success(ClaimCellularTaskResponse.newBuilder().setTaskAvailable(false).build()))
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+        val dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = dispatcher,
+            channelProvider = { MockChannel() }
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        assertThat(rpc.lastClaimRequest).isNull() // Claim was bypassed
+    }
+
+    @Test
+    fun testLowBatteryWithCharging_allowsClaim() = runTest {
+        // Enforces [REQ-OP-003]: Charging overrides low battery constraint
+        val batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 15, isCharging = true))
+        val rpc = FakeCellularRpc(Result.success(ClaimCellularTaskResponse.newBuilder().setTaskAvailable(false).build()))
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+        val dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = dispatcher,
+            channelProvider = { MockChannel() }
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        assertThat(rpc.lastClaimRequest).isNotNull()
+        assertThat(rpc.lastClaimRequest?.isCharging).isTrue()
+    }
+
+    @Test
+    fun testSuccessfulExecutionLifecycle_claimsExecutesAndSubmits() = runTest {
+        // Enforces [REQ-OP-003], [REQ-OP-004], [INV-003]
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_100")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom("payload".toByteArray()))
+            .build()
+
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder()
+                    .setTaskAvailable(true)
+                    .setTask(task)
+                    .build()
+            )
+        )
+        val batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false))
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+        val echoEngine = EchoEngine()
+        val dispatcher = TaskExecutionDispatcher(wasmEngine = echoEngine)
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = dispatcher,
+            channelProvider = { MockChannel() }
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        assertThat(echoEngine.executedTask?.taskId).isEqualTo("task_cell_100")
+        assertThat(rpc.lastSubmitRequest).isNotNull()
+        assertThat(rpc.lastSubmitRequest?.taskId).isEqualTo("task_cell_100")
+        assertThat(rpc.lastSubmitRequest?.runAttempt).isEqualTo(1)
+        assertThat(rpc.lastSubmitRequest?.stdoutBytes?.toStringUtf8())
+            .isEqualTo("computation output for task_cell_100")
+    }
+
+    @Test
+    fun testPreemptedStaleTaskSubmission_returnsSuccessToReturnWorkerToIdle() = runTest {
+        // Enforces [INV-004]: Preempted task receives TASK_ATTEMPT_STALE; worker returns to idle
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_stale")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .build()
+
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder()
+                    .setTaskAvailable(true)
+                    .setTask(task)
+                    .build()
+            ),
+            submitResponse = Result.failure(
+                StatusRuntimeException(Status.FAILED_PRECONDITION.withDescription("TASK_ATTEMPT_STALE"))
+            )
+        )
+        val batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 90, isCharging = true))
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+        val dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = dispatcher,
+            channelProvider = { MockChannel() }
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        // Worker handles stale attempt gracefully by returning success to complete the WorkManager job
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+    }
+
+    @Test
+    fun testClaimNetworkFailure_returnsRetry() = runTest {
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.failure(StatusRuntimeException(Status.UNAVAILABLE))
+        )
+        val batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 50, isCharging = false))
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+        val dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = dispatcher,
+            channelProvider = { MockChannel() }
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.retry())
+    }
+}
