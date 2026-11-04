@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network permissions for outbound control plane communication -->
+    <!-- Traces to: [INV-001], [INV-002], [REQ-OP-001], [REQ-OP-003] -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 14 Typed Foreground Service permissions -->
+    <!-- Traces to: [REQ-VER-001] -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:label="AndroGrid Worker"
+        android:supportsRtl="true"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <!-- Declares Typed Foreground Service strictly outbound-only -->
+        <!-- Traces to: [INV-001], [REQ-VER-001] -->
+        <service
+            android:name="com.androgrid.worker.service.WorkerForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+    </application>
+
+</manifest>
