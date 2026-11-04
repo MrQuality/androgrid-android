@@ -33,3 +33,24 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Security, Certificates & Secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+.env*
+!*.env.example
+credentials.json
+cloudflare-tunnel.json
+
+# Developer Environments & Tooling
+.agents/
+.agent/
+_agents/
+_agent/
+.gemini/
+.claude/
+.cursor/
+.vscode/
