@@ -1,0 +1,37 @@
+name: Android CI & Invariant Verification
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  verify:
+    name: Verify, Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Audit Typographic Standards (Zero Em/En Dashes)
+        run: |
+          echo "Scanning for forbidden em dashes and en dashes..."
+          if grep -rnP '[\x{2013}\x{2014}]' app/src/ build.gradle.kts settings.gradle.kts; then
+            echo "Error: Forbidden em dash or en dash detected!"
+            exit 1
+          fi
+          echo "Typographic audit passed: 0 em/en dashes found."
+
+      - name: Run Unit Tests and Invariant Audits
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
