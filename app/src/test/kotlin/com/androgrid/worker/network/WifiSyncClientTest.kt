@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Unit tests for Wi-Fi declarative state synchronization client.
  *
- * Traces to: [REQ-OP-001], [REQ-OP-002], Section 6.1
+ * Traces to: [REQ-OP-001], [REQ-OP-002], [INV-002], [NFR-SEC-001], Section 6.1
  */
 class WifiSyncClientTest {
 
@@ -146,5 +146,20 @@ class WifiSyncClientTest {
 
         client.shutdown(timeoutMs = 100L)
         assertThat(mockChannel.shutdownCalled.get()).isTrue()
+    }
+
+    @Test
+    fun testWifiSyncClient_acceptsCustomSslSocketFactory() {
+        val mtlsContext = DefaultMtlsSocketFactoryProvider.createMtlsContextFromPem(
+            caCertPem = TestCertificateFixtures.CA_CERT_PEM,
+            clientCertPem = TestCertificateFixtures.CLIENT_CERT_PEM,
+            clientKeyPem = TestCertificateFixtures.clientPrivateKeyPem
+        )
+        val client = WifiSyncClient(
+            host = "10.0.0.1",
+            port = 50051,
+            sslSocketFactory = mtlsContext.socketFactory
+        )
+        assertThat(client).isNotNull()
     }
 }

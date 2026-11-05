@@ -11,6 +11,7 @@ import io.grpc.okhttp.OkHttpChannelBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * Interface abstracting gRPC stub invocation for hermetic testing.
@@ -67,7 +68,8 @@ class DefaultCellularRpcInvoker : CellularRpcInvoker {
 class CellularTransportClient(
     private val ingressHost: String = "grpc.cluster.domain.com",
     private val ingressPort: Int = 443,
-    private val rpcInvoker: CellularRpcInvoker = DefaultCellularRpcInvoker()
+    private val rpcInvoker: CellularRpcInvoker = DefaultCellularRpcInvoker(),
+    private val sslSocketFactory: SSLSocketFactory? = null
 ) {
 
     /**
@@ -77,10 +79,13 @@ class CellularTransportClient(
      * Traces to: [INV-002], [NFR-SEC-001], [NFR-PERF-001]
      */
     fun createChannel(): ManagedChannel {
-        return OkHttpChannelBuilder.forAddress(ingressHost, ingressPort)
+        val builder = OkHttpChannelBuilder.forAddress(ingressHost, ingressPort)
             .useTransportSecurity()
             .maxInboundMessageSize(ContractConstants.MAX_FRAME_SIZE_BYTES.toInt())
-            .build()
+        if (sslSocketFactory != null) {
+            builder.sslSocketFactory(sslSocketFactory)
+        }
+        return builder.build()
     }
 
     /**

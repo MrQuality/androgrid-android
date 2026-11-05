@@ -11,6 +11,7 @@ import io.grpc.okhttp.OkHttpChannelBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * Interface abstracting Wi-Fi declarative gRPC stub invocation for testing.
@@ -68,13 +69,19 @@ class WifiSyncClient(
     private val host: String,
     private val port: Int,
     private val rpcInvoker: WifiRpcInvoker = DefaultWifiRpcInvoker(),
+    private val sslSocketFactory: SSLSocketFactory? = null,
     private val channelProvider: ((String, Int) -> ManagedChannel)? = null
 ) {
     private val channel: ManagedChannel by lazy {
-        channelProvider?.invoke(host, port) ?: OkHttpChannelBuilder.forAddress(host, port)
-            .useTransportSecurity()
-            .maxInboundMessageSize(ContractConstants.MAX_FRAME_SIZE_BYTES.toInt())
-            .build()
+        channelProvider?.invoke(host, port) ?: run {
+            val builder = OkHttpChannelBuilder.forAddress(host, port)
+                .useTransportSecurity()
+                .maxInboundMessageSize(ContractConstants.MAX_FRAME_SIZE_BYTES.toInt())
+            if (sslSocketFactory != null) {
+                builder.sslSocketFactory(sslSocketFactory)
+            }
+            builder.build()
+        }
     }
 
     /**
