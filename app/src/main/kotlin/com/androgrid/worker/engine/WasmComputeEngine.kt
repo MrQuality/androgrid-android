@@ -3,11 +3,13 @@ package com.androgrid.worker.engine
 import com.androgrid.v1.TaskSpec
 import com.dylibso.chicory.runtime.ExportFunction
 import com.dylibso.chicory.runtime.Instance
-import com.dylibso.chicory.runtime.Module
+import com.dylibso.chicory.runtime.Store
 import com.dylibso.chicory.runtime.WasmRuntimeException
 import com.dylibso.chicory.wasi.WasiExitException
 import com.dylibso.chicory.wasi.WasiOptions
 import com.dylibso.chicory.wasi.WasiPreview1
+import com.dylibso.chicory.wasm.Parser
+import com.dylibso.chicory.wasm.WasmModule
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -111,23 +113,26 @@ class WasmComputeEngine(
         val stdoutStream = ByteArrayOutputStream()
         val stderrStream = ByteArrayOutputStream()
 
-        val wasiOptions = WasiOptions.builder()
+        val wasiOptionsBuilder = WasiOptions.builder()
             .withStdout(stdoutStream)
             .withStderr(stderrStream)
-            .withEnv(envVars)
-            .build()
+
+        for ((key, value) in envVars) {
+            wasiOptionsBuilder.withEnvironment(key, value)
+        }
+        val wasiOptions = wasiOptionsBuilder.build()
 
         val wasi = WasiPreview1.builder()
             .withOptions(wasiOptions)
             .build()
 
+        val store = Store().addFunction(wasi.toHostFunctions())
+
         val rawBytes = bytecode.toByteArray()
 
         // Parse WASM module in-memory
-        val module = try {
-            Module.builder(rawBytes)
-                .withHostImports(wasi.toHostImports())
-                .build()
+        val module: WasmModule = try {
+            Parser.parse(rawBytes)
         } catch (t: Throwable) {
             return TaskExecutionResult.failure(
                 exitCode = -1,
@@ -136,9 +141,11 @@ class WasmComputeEngine(
             )
         }
 
-        // Instantiate WASM module instance
+        // Instantiate WASM module instance with WASI host functions
         val instance = try {
-            Instance.builder(module).build()
+            Instance.builder(module)
+                .withImportValues(store.toImportValues())
+                .build()
         } catch (t: Throwable) {
             return TaskExecutionResult.failure(
                 exitCode = -1,
@@ -157,7 +164,7 @@ class WasmComputeEngine(
             null
         }
 
-        val finalFunc = if (exportFunc == null && requestedEntrypoint.isEmpty()) {
+        val resolvedFunc: ExportFunction? = if (exportFunc == null && requestedEntrypoint.isEmpty()) {
             try {
                 instance.export("main")
             } catch (e: Exception) {
@@ -167,7 +174,7 @@ class WasmComputeEngine(
             exportFunc
         }
 
-        if (finalFunc == null) {
+        val func = resolvedFunc ?: run {
             val missingName = if (requestedEntrypoint.isNotEmpty()) requestedEntrypoint else "_start"
             return TaskExecutionResult.failure(
                 exitCode = -1,
@@ -185,9 +192,9 @@ class WasmComputeEngine(
 
         return try {
             val results = if (args.isNotEmpty()) {
-                finalFunc.apply(*args)
+                func.apply(*args)
             } else {
-                finalFunc.apply()
+                func.apply()
             }
 
             val stdoutBytes = stdoutStream.toByteArray()
@@ -200,7 +207,8 @@ class WasmComputeEngine(
                 stdoutBytes
             }
 
-            TaskExecutionResult.success(
+            TaskExecutionResult(
+                exitCode = 0,
                 stdoutBytes = finalStdout,
                 stderrBytes = stderrBytes
             )
@@ -209,38 +217,42 @@ class WasmComputeEngine(
             val stderrBytes = stderrStream.toByteArray()
             val code = e.exitCode()
             if (code == 0) {
-                TaskExecutionResult.success(
+                TaskExecutionResult(
+                    exitCode = 0,
                     stdoutBytes = stdoutBytes,
                     stderrBytes = stderrBytes
                 )
             } else {
-                TaskExecutionResult.failure(
+                val errorMsg = "WASI module exited with non-zero status: $code"
+                TaskExecutionResult(
                     exitCode = code,
-                    errorCode = "WASI_EXIT_NON_ZERO",
-                    errorMessage = "WASI module exited with non-zero status: $code",
                     stdoutBytes = stdoutBytes,
-                    stderrBytes = stderrBytes
+                    stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
+                    errorCode = "WASI_EXIT_NON_ZERO",
+                    errorMessage = errorMsg
                 )
             }
         } catch (e: WasmRuntimeException) {
             val stdoutBytes = stdoutStream.toByteArray()
             val stderrBytes = stderrStream.toByteArray()
-            TaskExecutionResult.failure(
+            val errorMsg = "WASM runtime trap: ${e.message ?: e.javaClass.simpleName}"
+            TaskExecutionResult(
                 exitCode = -1,
-                errorCode = "WASM_TRAP",
-                errorMessage = "WASM runtime trap: ${e.message ?: e.javaClass.simpleName}",
                 stdoutBytes = stdoutBytes,
-                stderrBytes = stderrBytes
+                stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
+                errorCode = "WASM_TRAP",
+                errorMessage = errorMsg
             )
         } catch (t: Throwable) {
             val stdoutBytes = stdoutStream.toByteArray()
             val stderrBytes = stderrStream.toByteArray()
-            TaskExecutionResult.failure(
+            val errorMsg = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
+            TaskExecutionResult(
                 exitCode = -1,
-                errorCode = "WASM_TRAP",
-                errorMessage = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}",
                 stdoutBytes = stdoutBytes,
-                stderrBytes = stderrBytes
+                stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
+                errorCode = "WASM_TRAP",
+                errorMessage = errorMsg
             )
         }
     }
