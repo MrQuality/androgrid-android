@@ -55,6 +55,7 @@ dependencies {
     implementation("io.grpc:grpc-protobuf-lite:1.64.0")
     implementation("io.grpc:grpc-kotlin-stub:1.4.1")
     implementation("com.google.protobuf:protobuf-javalite:3.25.1")
+    implementation("com.google.protobuf:protobuf-kotlin-lite:3.25.1")
 
     // Unit & Robolectric Testing
     testImplementation("junit:junit:4.13.2")
@@ -80,9 +81,6 @@ protobuf {
         all().forEach { task ->
             task.builtins {
                 id("java") {
-                    option("lite")
-                }
-                id("kotlin") {
                     option("lite")
                 }
             }
