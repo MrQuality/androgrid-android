@@ -29,6 +29,14 @@ class ToyboxUserEngineTest {
         ): ProcessOutput {
             executedCommand = command.joinToString(" ")
             executedEnvironment = environment
+            if (delayMs > timeoutSeconds * 1000L) {
+                return ProcessOutput(
+                    exitCode = -1,
+                    stdoutBytes = ByteArray(0),
+                    stderrBytes = "Process exceeded timeout of ${timeoutSeconds}s and was forcibly terminated"
+                        .toByteArray(Charsets.UTF_8)
+                )
+            }
             if (delayMs > 0) {
                 kotlinx.coroutines.delay(delayMs)
             }

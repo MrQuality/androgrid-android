@@ -1,6 +1,7 @@
 package com.androgrid.worker.network
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import org.junit.Test
 import java.io.File
 
@@ -60,8 +61,8 @@ class InboundPortGuardTest {
                 val content = file.readText()
                 for (token in forbiddenTokens) {
                     val violation = content.contains(token) && !content.contains("scanDirForServerSockets")
-                    assertThat(violation)
-                        .named("File ${file.name} contains forbidden listening socket token: $token")
+                    assertWithMessage("File ${file.name} contains forbidden listening socket token: $token")
+                        .that(violation)
                         .isFalse()
                 }
             }
