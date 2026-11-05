@@ -161,6 +161,7 @@ class WasmComputeEngine(
         // Instantiate WASM module instance with WASI host functions
         val instance = try {
             val builder = Instance.builder(module)
+                .withStart(false)
             if (hasImports) {
                 builder.withImportValues(store.toImportValues())
             }
