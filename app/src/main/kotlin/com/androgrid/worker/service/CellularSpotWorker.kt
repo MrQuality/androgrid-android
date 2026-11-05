@@ -16,6 +16,8 @@ import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.network.CellularTransportClient
+import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
+import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import io.grpc.ManagedChannel
 
 /**
@@ -23,7 +25,7 @@ import io.grpc.ManagedChannel
  * Enforces battery preconditions ([REQ-OP-003]), offline execution ([INV-003]),
  * and atomic result submission ([REQ-OP-004]).
  *
- * Traces to: [INV-001], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001]
+ * Traces to: [INV-001], [INV-002], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001], [NFR-SEC-001]
  */
 class CellularSpotWorkerLogic(
     private val nodeId: String,
@@ -111,7 +113,7 @@ class CellularSpotWorkerLogic(
  * Android Jetpack CoroutineWorker for cellular spot task execution.
  * Enforces zero-keepalive radio sleep and background WorkManager constraints.
  *
- * Traces to: [INV-001], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001]
+ * Traces to: [INV-001], [INV-002], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001], [NFR-SEC-001]
  */
 class CellularSpotWorker(
     appContext: Context,
@@ -124,10 +126,20 @@ class CellularSpotWorker(
         val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
         val batteryProvider = AndroidBatteryStatusProvider(appContext)
 
+        val settingsRepo = SharedPreferencesClusterSettingsRepository.getInstance(appContext)
+        val settings = settingsRepo.getSettings()
+        val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
+        val cellularClient = CellularTransportClient(
+            ingressHost = settings.cellularHost,
+            ingressPort = settings.cellularPort,
+            sslSocketFactory = mtlsContext?.socketFactory
+        )
+
         CellularSpotWorkerLogic(
             nodeId = "node_${android.os.Build.SERIAL.takeIf { it != "unknown" } ?: "android_worker"}",
             batteryProvider = batteryProvider,
-            capabilityProvider = capabilityProvider
+            capabilityProvider = capabilityProvider,
+            cellularClient = cellularClient
         )
     }
 

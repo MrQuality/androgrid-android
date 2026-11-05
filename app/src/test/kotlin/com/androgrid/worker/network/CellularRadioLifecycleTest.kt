@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Tests for zero-keepalive cellular lifecycle and baseband radio-sleep teardown.
  *
- * Traces to: [INV-001], [INV-003], [ANTI-001], [NFR-POW-001]
+ * Traces to: [INV-001], [INV-002], [INV-003], [ANTI-001], [NFR-POW-001], [NFR-SEC-001]
  */
 class CellularRadioLifecycleTest {
 
@@ -106,16 +106,18 @@ class CellularRadioLifecycleTest {
     }
 
     @Test
-    fun testClaimCellularTask_terminatesChannelEvenOnRpcFailure() = runTest {
-        // Enforces [INV-003]: Channel must not leak or remain open when RPC fails
+    fun testClaimCellularTask_terminatesChannelOnRpcFailure() = runTest {
+        // Enforces [INV-003]: Even on network error, socket must immediately close
         val channel = RecordingChannel()
-        val errorInvoker = FakeUnaryService(
-            claimResult = Result.failure(StatusRuntimeException(Status.UNAUTHENTICATED))
+        val failingInvoker = FakeUnaryService(
+            claimResult = Result.failure(StatusRuntimeException(Status.UNAVAILABLE))
         )
-        val client = CellularTransportClient(rpcInvoker = errorInvoker)
+        val client = CellularTransportClient(rpcInvoker = failingInvoker)
 
         val request = ClaimCellularTaskRequest.newBuilder()
             .setNodeId("node_test_01")
+            .setBatteryLevelPct(85)
+            .setIsCharging(true)
             .build()
 
         val response = client.claimTaskWithChannel(channel, request)
@@ -127,7 +129,7 @@ class CellularRadioLifecycleTest {
 
     @Test
     fun testSubmitCellularResult_immediatelyTerminatesChannelWithin200Ms() = runTest {
-        // Enforces [INV-003] and [NFR-POW-001]: Submission channel is ephemeral and torn down immediately
+        // Enforces [INV-003] and [NFR-POW-001]: Submission socket must close within 200 ms
         val channel = RecordingChannel()
         val client = CellularTransportClient(rpcInvoker = FakeUnaryService())
 
@@ -135,7 +137,6 @@ class CellularRadioLifecycleTest {
             .setNodeId("node_test_01")
             .setTaskId("task_test_01")
             .setRunAttempt(1)
-            .setExitCode(0)
             .build()
 
         val response = client.submitResultWithChannel(channel, request)
@@ -169,5 +170,20 @@ class CellularRadioLifecycleTest {
         assertThat(response.isFailure).isTrue()
         assertThat(channel.shutdownNowCalled.get()).isTrue()
         assertThat(channel.awaitTerminationCalled.get()).isTrue()
+    }
+
+    @Test
+    fun testCellularTransportClient_acceptsCustomSslSocketFactory() {
+        val mtlsContext = DefaultMtlsSocketFactoryProvider.createMtlsContextFromPem(
+            caCertPem = TestCertificateFixtures.CA_CERT_PEM,
+            clientCertPem = TestCertificateFixtures.CLIENT_CERT_PEM,
+            clientKeyPem = TestCertificateFixtures.clientPrivateKeyPem
+        )
+        val client = CellularTransportClient(
+            ingressHost = "grpc.cloudflare.net",
+            ingressPort = 443,
+            sslSocketFactory = mtlsContext.socketFactory
+        )
+        assertThat(client).isNotNull()
     }
 }

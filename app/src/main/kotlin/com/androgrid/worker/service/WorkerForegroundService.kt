@@ -20,6 +20,8 @@ import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.engine.TaskExecutionDispatcher
+import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
+import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.network.WifiSyncClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,7 +37,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
  * Bifurcates lifecycle between API 34+ typed foreground service and legacy fallbacks.
  * Executes declarative synchronization loop every 2.0 seconds ([REQ-OP-002]).
  *
- * Traces to: [REQ-OP-001], [REQ-OP-002], [REQ-VER-001], [INV-001]
+ * Traces to: [REQ-OP-001], [REQ-OP-002], [REQ-VER-001], [INV-001], [INV-002], [NFR-SEC-001]
  */
 class WorkerForegroundService : Service() {
 
@@ -119,7 +121,15 @@ class WorkerForegroundService : Service() {
             val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
             val dispatcher = TaskExecutionDispatcher()
 
-            val client = WifiSyncClient(host = "192.168.1.100", port = 50051)
+            val settingsRepo = SharedPreferencesClusterSettingsRepository.getInstance(applicationContext)
+            val settings = settingsRepo.getSettings()
+            val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
+
+            val client = WifiSyncClient(
+                host = settings.wifiHost,
+                port = settings.wifiPort,
+                sslSocketFactory = mtlsContext?.socketFactory
+            )
             wifiClient = client
 
             val nodeId = "node_${Build.SERIAL.takeIf { it != "unknown" } ?: "android_wifi_worker"}"

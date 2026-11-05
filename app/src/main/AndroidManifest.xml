@@ -32,6 +32,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Cluster Settings and mTLS Enrollment Activity -->
+        <!-- Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001] -->
+        <activity
+            android:name="com.androgrid.worker.ui.SettingsActivity"
+            android:exported="false"
+            android:label="Cluster Settings" />
+
         <!-- Declares Typed Foreground Service strictly outbound-only -->
         <!-- Traces to: [INV-001], [REQ-VER-001] -->
         <service

@@ -2,6 +2,7 @@ package com.androgrid.worker.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -32,7 +33,7 @@ import kotlinx.coroutines.launch
  * Interactive Worker Dashboard Activity providing operator observability and control.
  * Handles Android 13+ POST_NOTIFICATIONS runtime permissions and displays live telemetry.
  *
- * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002]
+ * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002], [INV-002]
  */
 class MainActivity : ComponentActivity() {
 
@@ -47,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var batteryView: TextView
     private lateinit var telemetryView: TextView
     private lateinit var toggleButton: Button
+    private lateinit var settingsButton: Button
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -166,6 +168,24 @@ class MainActivity : ComponentActivity() {
             setMargins(0, 48, 0, 0)
         }
         rootLayout.addView(toggleButton, buttonParams)
+
+        settingsButton = Button(this).apply {
+            text = "Cluster Network & mTLS Settings"
+            textSize = 14f
+            setBackgroundColor(Color.parseColor("#37474F"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                val intent = Intent(this@MainActivity, SettingsActivity::class.java)
+                startActivity(intent)
+            }
+        }
+        val settingsParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 24, 0, 0)
+        }
+        rootLayout.addView(settingsButton, settingsParams)
 
         val scrollView = ScrollView(this).apply {
             addView(rootLayout)
