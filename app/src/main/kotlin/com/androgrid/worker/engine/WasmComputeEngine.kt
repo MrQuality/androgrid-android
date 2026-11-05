@@ -126,7 +126,7 @@ class WasmComputeEngine(
             .withOptions(wasiOptions)
             .build()
 
-        val store = Store().addFunction(wasi.toHostFunctions())
+        val store = Store().addFunction(*wasi.toHostFunctions())
 
         val rawBytes = bytecode.toByteArray()
 
