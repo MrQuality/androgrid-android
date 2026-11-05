@@ -11,8 +11,9 @@ import com.dylibso.chicory.wasi.WasiPreview1
 import com.dylibso.chicory.wasm.Parser
 import com.dylibso.chicory.wasm.WasmModule
 import com.google.protobuf.ByteString
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -71,29 +72,37 @@ class WasmComputeEngine(
         val timeoutSeconds = if (task.timeoutSeconds > 0) task.timeoutSeconds.toLong() else 180L
         val timeoutMillis = timeoutSeconds * 1000L
 
-        val result = withTimeoutOrNull(timeoutMillis) {
-            withContext(Dispatchers.Default) {
-                try {
-                    if (executionRunner != null) {
-                        executionRunner.invoke(task.wasmBytecode, task.envVarsMap)
-                    } else {
-                        executeWasmInMemory(task.wasmBytecode, task.envVarsMap, task.entrypoint)
-                    }
-                } catch (t: Throwable) {
-                    TaskExecutionResult.failure(
-                        exitCode = -1,
-                        errorCode = "WASM_TRAP",
-                        errorMessage = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
-                    )
+        val scope = CoroutineScope(Dispatchers.Default)
+        val deferred = scope.async {
+            try {
+                if (executionRunner != null) {
+                    executionRunner.invoke(task.wasmBytecode, task.envVarsMap)
+                } else {
+                    executeWasmInMemory(task.wasmBytecode, task.envVarsMap, task.entrypoint)
                 }
+            } catch (t: Throwable) {
+                TaskExecutionResult.failure(
+                    exitCode = -1,
+                    errorCode = "WASM_TRAP",
+                    errorMessage = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
+                )
             }
         }
 
-        return result ?: TaskExecutionResult.failure(
-            exitCode = -1,
-            errorCode = "TIMEOUT",
-            errorMessage = "Execution exceeded timeout of ${timeoutSeconds}s"
-        )
+        val result = withTimeoutOrNull(timeoutMillis) {
+            deferred.await()
+        }
+
+        return if (result == null) {
+            deferred.cancel()
+            TaskExecutionResult.failure(
+                exitCode = -1,
+                errorCode = "TIMEOUT",
+                errorMessage = "Execution exceeded timeout of ${timeoutSeconds}s"
+            )
+        } else {
+            result
+        }
     }
 
     /**
@@ -141,11 +150,21 @@ class WasmComputeEngine(
             )
         }
 
+        // Detect if module declares imports before supplying host imports
+        val hasImports = try {
+            val importSec = module.importSection()
+            importSec != null && importSec.importCount() > 0
+        } catch (e: Exception) {
+            false
+        }
+
         // Instantiate WASM module instance with WASI host functions
         val instance = try {
-            Instance.builder(module)
-                .withImportValues(store.toImportValues())
-                .build()
+            val builder = Instance.builder(module)
+            if (hasImports) {
+                builder.withImportValues(store.toImportValues())
+            }
+            builder.build()
         } catch (t: Throwable) {
             return TaskExecutionResult.failure(
                 exitCode = -1,
