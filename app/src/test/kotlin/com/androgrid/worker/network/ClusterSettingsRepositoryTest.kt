@@ -1,12 +1,12 @@
 package com.androgrid.worker.network
 
 import android.content.Context
-import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
@@ -23,7 +23,7 @@ class ClusterSettingsRepositoryTest {
 
     @Before
     fun setUp() {
-        context = ApplicationProvider.getApplicationContext()
+        context = RuntimeEnvironment.getApplication()
         val prefs = context.getSharedPreferences(
             SharedPreferencesClusterSettingsRepository.PREFS_NAME,
             Context.MODE_PRIVATE
