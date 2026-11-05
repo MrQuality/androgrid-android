@@ -33,6 +33,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -43,6 +44,13 @@ android {
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Desugaring support for Android minSdk 28
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
+    // Embedded WebAssembly (WASI) Runtime - Chicory
+    implementation("com.dylibso.chicory:runtime:1.7.5")
+    implementation("com.dylibso.chicory:wasi:1.7.5")
 
     // Jetpack WorkManager & Foreground Services
     implementation("androidx.work:work-runtime-ktx:2.9.0")
