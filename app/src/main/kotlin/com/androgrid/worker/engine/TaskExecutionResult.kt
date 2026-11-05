@@ -20,6 +20,13 @@ data class TaskExecutionResult(
     val executionDurationMs: Long = 0L
 ) {
     /**
+     * True if the task execution succeeded with zero exit code and no error code.
+     * Traces to: [REQ-OP-004]
+     */
+    val isSuccess: Boolean
+        get() = exitCode == 0 && errorCode.isEmpty()
+
+    /**
      * Decodes stdoutBytes as UTF-8 string for logging and assertion.
      */
     fun stdoutString(): String = stdoutBytes.toString(Charsets.UTF_8).trim()
