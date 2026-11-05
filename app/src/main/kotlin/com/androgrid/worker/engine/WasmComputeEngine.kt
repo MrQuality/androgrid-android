@@ -231,49 +231,58 @@ class WasmComputeEngine(
                 stdoutBytes = finalStdout,
                 stderrBytes = stderrBytes
             )
-        } catch (e: WasiExitException) {
-            val stdoutBytes = stdoutStream.toByteArray()
-            val stderrBytes = stderrStream.toByteArray()
-            val code = e.exitCode()
-            if (code == 0) {
-                TaskExecutionResult(
-                    exitCode = 0,
-                    stdoutBytes = stdoutBytes,
-                    stderrBytes = stderrBytes
-                )
-            } else {
-                val errorMsg = "WASI module exited with non-zero status: $code"
-                TaskExecutionResult(
-                    exitCode = code,
-                    stdoutBytes = stdoutBytes,
-                    stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
-                    errorCode = "WASI_EXIT_NON_ZERO",
-                    errorMessage = errorMsg
-                )
-            }
-        } catch (e: WasmRuntimeException) {
-            val stdoutBytes = stdoutStream.toByteArray()
-            val stderrBytes = stderrStream.toByteArray()
-            val errorMsg = "WASM runtime trap: ${e.message ?: e.javaClass.simpleName}"
-            TaskExecutionResult(
-                exitCode = -1,
-                stdoutBytes = stdoutBytes,
-                stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
-                errorCode = "WASM_TRAP",
-                errorMessage = errorMsg
-            )
         } catch (t: Throwable) {
             val stdoutBytes = stdoutStream.toByteArray()
             val stderrBytes = stderrStream.toByteArray()
-            val errorMsg = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
-            TaskExecutionResult(
-                exitCode = -1,
-                stdoutBytes = stdoutBytes,
-                stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
-                errorCode = "WASM_TRAP",
-                errorMessage = errorMsg
-            )
+            val wasiExit = findWasiExitException(t)
+            if (wasiExit != null) {
+                val code = wasiExit.exitCode()
+                if (code == 0) {
+                    TaskExecutionResult(
+                        exitCode = 0,
+                        stdoutBytes = stdoutBytes,
+                        stderrBytes = stderrBytes
+                    )
+                } else {
+                    val errorMsg = "WASI module exited with non-zero status: $code"
+                    TaskExecutionResult(
+                        exitCode = code,
+                        stdoutBytes = stdoutBytes,
+                        stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
+                        errorCode = "WASI_EXIT_NON_ZERO",
+                        errorMessage = errorMsg
+                    )
+                }
+            } else {
+                val errorMsg = if (t is WasmRuntimeException) {
+                    "WASM runtime trap: ${t.message ?: t.javaClass.simpleName}"
+                } else {
+                    "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
+                }
+                TaskExecutionResult(
+                    exitCode = -1,
+                    stdoutBytes = stdoutBytes,
+                    stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
+                    errorCode = "WASM_TRAP",
+                    errorMessage = errorMsg
+                )
+            }
         }
+    }
+
+    /**
+     * Traverses the exception cause hierarchy to identify any underlying WasiExitException.
+     *
+     * @param throwable root or wrapped exception.
+     * @return WasiExitException if present, or null.
+     */
+    private fun findWasiExitException(throwable: Throwable): WasiExitException? {
+        var current: Throwable? = throwable
+        while (current != null) {
+            if (current is WasiExitException) return current
+            current = current.cause
+        }
+        return null
     }
 
     /**
