@@ -24,7 +24,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testBytecodeIntegrity_validSha256Passes() = runBlocking {
+    fun testBytecodeIntegrity_validSha256Passes(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val dummyBytecode = TestWasmBytecodeFixtures.HELLO_WASI
         val validSha256 = computeSha256(dummyBytecode)
@@ -42,7 +42,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testBytecodeIntegrity_corruptedSha256Rejected() = runBlocking {
+    fun testBytecodeIntegrity_corruptedSha256Rejected(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val dummyBytecode = TestWasmBytecodeFixtures.HELLO_WASI
         val invalidSha256 = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -63,7 +63,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testRealWasiModule_capturesStdoutSuccessfully() = runBlocking {
+    fun testRealWasiModule_capturesStdoutSuccessfully(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val wasiBytecode = TestWasmBytecodeFixtures.HELLO_WASI
         val sha256 = computeSha256(wasiBytecode)
@@ -84,7 +84,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testRealPureWasm_fibonacciCalculatesCorrectly() = runBlocking {
+    fun testRealPureWasm_fibonacciCalculatesCorrectly(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val fibBytecode = TestWasmBytecodeFixtures.FIBONACCI
 
@@ -106,7 +106,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testDeliberateWasmTrap_unreachableYieldsTrapError() = runBlocking {
+    fun testDeliberateWasmTrap_unreachableYieldsTrapError(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val trapBytecode = TestWasmBytecodeFixtures.TRAP_ABORT
 
@@ -125,7 +125,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testInfiniteLoop_abortsWhenTimeoutExpires() = runBlocking {
+    fun testInfiniteLoop_abortsWhenTimeoutExpires(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val loopBytecode = TestWasmBytecodeFixtures.INFINITE_LOOP
 
@@ -144,7 +144,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testWasiExitCode_nonZeroCapturedProperly() = runBlocking {
+    fun testWasiExitCode_nonZeroCapturedProperly(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val exitBytecode = TestWasmBytecodeFixtures.EXIT_42
 
@@ -163,7 +163,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testPayloadExceeds16MBFrameLimit_rejected() = runBlocking {
+    fun testPayloadExceeds16MBFrameLimit_rejected(): Unit = runBlocking {
         // Enforces [NFR-PERF-001]: Upper bound of 16 MB strictly enforced
         val engine = WasmComputeEngine()
         val oversizedSize = 16 * 1024 * 1024 + 1
@@ -184,7 +184,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testMalformedBytecode_rejectedAsCorrupt() = runBlocking {
+    fun testMalformedBytecode_rejectedAsCorrupt(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val malformedBytes = "Not a valid WASM binary header".toByteArray(Charsets.UTF_8)
 
@@ -202,7 +202,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testMissingExplicitEntrypoint_reportsNotFoundError() = runBlocking {
+    fun testMissingExplicitEntrypoint_reportsNotFoundError(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val fibBytecode = TestWasmBytecodeFixtures.FIBONACCI
 
@@ -222,7 +222,7 @@ class WasmComputeEngineTest {
     }
 
     @Test
-    fun testInMemoryExecution_neverWritesDynamicLibrariesToDisk() = runBlocking {
+    fun testInMemoryExecution_neverWritesDynamicLibrariesToDisk(): Unit = runBlocking {
         // Enforces [REQ-VER-003]: In-memory W^X compliance; no .so files written to disk
         val tempDir = File(System.getProperty("java.io.tmpdir"), "androgrid_wasm_test")
         tempDir.mkdirs()
