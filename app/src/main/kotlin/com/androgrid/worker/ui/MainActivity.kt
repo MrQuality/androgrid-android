@@ -3,6 +3,7 @@ package com.androgrid.worker.ui
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -18,16 +19,21 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.androgrid.worker.automation.PkiCredentialLoader
+import com.androgrid.worker.automation.TestAutomationReceiver
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.capability.StandardRootChecker
+import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.NetworkRoute
 import com.androgrid.worker.network.NetworkRouteMonitor
+import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.service.AndroidServiceController
 import com.androgrid.worker.service.AndroidWorkScheduler
 import com.androgrid.worker.service.WorkerLifecycleCoordinator
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * Interactive Worker Dashboard Activity providing operator observability and control.
@@ -36,6 +42,8 @@ import kotlinx.coroutines.launch
  * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002], [INV-002]
  */
 class MainActivity : ComponentActivity() {
+
+    internal var settingsRepository: ClusterSettingsRepository? = null
 
     private lateinit var viewModel: WorkerDashboardViewModel
     private lateinit var networkMonitor: NetworkRouteMonitor
@@ -63,6 +71,71 @@ class MainActivity : ComponentActivity() {
         setupContentView()
         requestNotificationPermission()
         observeState()
+        handleAutomationIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        handleAutomationIntent(intent)
+    }
+
+    internal fun getDashboardViewModel(): WorkerDashboardViewModel = viewModel
+
+    private fun handleAutomationIntent(intent: Intent?) {
+        if (intent == null) return
+        val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (!isDebuggable) return
+
+        val repo = settingsRepository ?: SharedPreferencesClusterSettingsRepository.getInstance(applicationContext)
+
+        when (intent.action) {
+            TestAutomationReceiver.ACTION_CONFIGURE_ENDPOINT -> {
+                val current = repo.getSettings()
+                val wifiHost = intent.getStringExtra(TestAutomationReceiver.EXTRA_WIFI_HOST) ?: current.wifiHost
+                val wifiPort = intent.getIntExtra(TestAutomationReceiver.EXTRA_WIFI_PORT, current.wifiPort)
+                val cellularHost = intent.getStringExtra(TestAutomationReceiver.EXTRA_CELLULAR_HOST) ?: current.cellularHost
+                val cellularPort = intent.getIntExtra(TestAutomationReceiver.EXTRA_CELLULAR_PORT, current.cellularPort)
+
+                val caCertPem = intent.getStringExtra(TestAutomationReceiver.EXTRA_CA_CERT_PEM) ?: current.caCertPem
+                val clientCertPem = intent.getStringExtra(TestAutomationReceiver.EXTRA_CLIENT_CERT_PEM) ?: current.clientCertPem
+                val clientKeyPem = intent.getStringExtra(TestAutomationReceiver.EXTRA_CLIENT_KEY_PEM) ?: current.clientKeyPem
+
+                repo.updateSettings(
+                    current.copy(
+                        wifiHost = wifiHost,
+                        wifiPort = wifiPort,
+                        cellularHost = cellularHost,
+                        cellularPort = cellularPort
+                    )
+                )
+
+                val pkiDirExtra = intent.getStringExtra(TestAutomationReceiver.EXTRA_PKI_DIR)
+                val caPath = intent.getStringExtra(TestAutomationReceiver.EXTRA_CA_CERT_PATH)
+                val certPath = intent.getStringExtra(TestAutomationReceiver.EXTRA_CLIENT_CERT_PATH)
+                val keyPath = intent.getStringExtra(TestAutomationReceiver.EXTRA_CLIENT_KEY_PATH)
+
+                if (pkiDirExtra != null) {
+                    PkiCredentialLoader.loadFromDirectory(File(pkiDirExtra), repo)
+                } else if (caPath != null && certPath != null && keyPath != null) {
+                    PkiCredentialLoader.loadFromPaths(caPath, certPath, keyPath, repo)
+                } else if (caCertPem.isNotBlank() && clientCertPem.isNotBlank() && clientKeyPem.isNotBlank()) {
+                    repo.updateCertificates(caCertPem, clientCertPem, clientKeyPem)
+                } else {
+                    PkiCredentialLoader.syncCanonicalDirectoryIfPresent(applicationContext, repo)
+                }
+
+                val autoStart = intent.getBooleanExtra(TestAutomationReceiver.EXTRA_AUTO_START, false)
+                if (autoStart) {
+                    viewModel.startParticipation()
+                }
+            }
+            TestAutomationReceiver.ACTION_START_PARTICIPATION -> {
+                viewModel.startParticipation()
+            }
+            TestAutomationReceiver.ACTION_STOP_PARTICIPATION -> {
+                viewModel.stopParticipation()
+            }
+        }
     }
 
     override fun onDestroy() {

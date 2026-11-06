@@ -70,6 +70,7 @@ class WifiSyncClient(
     private val port: Int,
     private val rpcInvoker: WifiRpcInvoker = DefaultWifiRpcInvoker(),
     private val sslSocketFactory: SSLSocketFactory? = null,
+    private val authority: String? = null,
     private val channelProvider: ((String, Int) -> ManagedChannel)? = null
 ) {
     private val channel: ManagedChannel by lazy {
@@ -79,6 +80,9 @@ class WifiSyncClient(
                 .maxInboundMessageSize(ContractConstants.MAX_FRAME_SIZE_BYTES.toInt())
             if (sslSocketFactory != null) {
                 builder.sslSocketFactory(sslSocketFactory)
+            }
+            if (authority != null) {
+                builder.overrideAuthority(authority)
             }
             builder.build()
         }
