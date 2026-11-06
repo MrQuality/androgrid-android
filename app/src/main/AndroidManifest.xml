@@ -46,6 +46,19 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Headless Test Automation Intent Receiver for E2E Cluster Smoke Harness -->
+        <!-- Responds exclusively via Binder IPC; opens zero listening TCP sockets -->
+        <!-- Traces to: [INV-001], [INV-002], [NFR-SEC-001], [REQ-OP-001] -->
+        <receiver
+            android:name="com.androgrid.worker.automation.TestAutomationReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.androgrid.worker.action.CONFIGURE_ENDPOINT" />
+                <action android:name="com.androgrid.worker.action.START_PARTICIPATION" />
+                <action android:name="com.androgrid.worker.action.STOP_PARTICIPATION" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

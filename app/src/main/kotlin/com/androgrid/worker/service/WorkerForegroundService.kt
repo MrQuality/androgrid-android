@@ -125,10 +125,12 @@ class WorkerForegroundService : Service() {
             val settings = settingsRepo.getSettings()
             val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
 
+            val authority = if (settings.wifiHost == "10.0.2.2" || settings.wifiHost == "127.0.0.1") "localhost" else null
             val client = WifiSyncClient(
                 host = settings.wifiHost,
                 port = settings.wifiPort,
-                sslSocketFactory = mtlsContext?.socketFactory
+                sslSocketFactory = mtlsContext?.socketFactory,
+                authority = authority
             )
             wifiClient = client
 
