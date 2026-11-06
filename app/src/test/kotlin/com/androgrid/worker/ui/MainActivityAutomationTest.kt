@@ -2,6 +2,10 @@ package com.androgrid.worker.ui
 
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.util.Log
+import androidx.work.Configuration
+import androidx.work.testing.SynchronousExecutor
+import androidx.work.testing.WorkManagerTestInitHelper
 import com.androgrid.worker.automation.TestAutomationReceiver
 import com.androgrid.worker.network.ClusterSettings
 import com.androgrid.worker.network.InMemoryClusterSettingsRepository
@@ -31,6 +35,11 @@ class MainActivityAutomationTest {
     fun setUp() {
         val app = RuntimeEnvironment.getApplication()
         app.applicationInfo.flags = app.applicationInfo.flags or ApplicationInfo.FLAG_DEBUGGABLE
+        val config = Configuration.Builder()
+            .setMinimumLoggingLevel(Log.DEBUG)
+            .setExecutor(SynchronousExecutor())
+            .build()
+        WorkManagerTestInitHelper.initializeTestWorkManager(app, config)
         repo = InMemoryClusterSettingsRepository()
     }
 
