@@ -4,7 +4,8 @@ import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 
 /**
- * Unit tests for ThermalSafetyGuard verifying temperature and thermal throttling thresholds.
+ * Unit tests for ThermalSafetyGuard verifying temperature, thermal throttling thresholds,
+ * and hysteresis dampening preventing thermal flapping loops.
  *
  * Traces to: [INV-003], [NFR-POW-001], [REQ-OP-003]
  */
@@ -62,7 +63,9 @@ class ThermalSafetyGuardTest {
     fun testCustomThresholds() {
         val customGuard = ThermalSafetyGuard(
             maxBatteryTemperatureCelsius = 40,
-            maxThermalStatus = 4
+            resumeBatteryTemperatureCelsius = 36,
+            maxThermalStatus = 4,
+            resumeThermalStatus = 2
         )
 
         // 39 degrees Celsius is allowed under 40 bound
@@ -71,7 +74,57 @@ class ThermalSafetyGuardTest {
         // 41 degrees Celsius throttles
         assertThat(customGuard.isThermalThrottled(temperatureCelsius = 41, thermalStatus = 0)).isTrue()
 
-        // Status 4 throttles
-        assertThat(customGuard.isThermalThrottled(temperatureCelsius = 30, thermalStatus = 4)).isTrue()
+        // 38 degrees Celsius: still throttled (since 38 > 36 resume threshold)
+        assertThat(customGuard.isThermalThrottled(temperatureCelsius = 38, thermalStatus = 0)).isTrue()
+
+        // 36 degrees Celsius: cools below resume threshold, resumes
+        assertThat(customGuard.isThermalThrottled(temperatureCelsius = 36, thermalStatus = 1)).isFalse()
+    }
+
+    @Test
+    fun testThermalHysteresis_preventsFlappingBetweenCutoffAndResumeThresholds() {
+        val guard = ThermalSafetyGuard()
+
+        // Initial healthy state at 36 degrees Celsius
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 36, thermalStatus = 0)).isFalse()
+
+        // Temperature rises to 38 degrees Celsius: still within upper bound
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 38, thermalStatus = 0)).isFalse()
+
+        // Temperature spikes to 39 degrees Celsius (> 38 C cutoff): triggers throttled state
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 39, thermalStatus = 0)).isTrue()
+
+        // Flapping scenario: temperature drops back to 38 C
+        // Under hysteresis dampening, device MUST remain throttled
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 38, thermalStatus = 0)).isTrue()
+
+        // Drops to 37 C: still throttled
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 37, thermalStatus = 0)).isTrue()
+
+        // Drops to 36 C: still throttled
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 36, thermalStatus = 0)).isTrue()
+
+        // Cooldown reaches resume threshold of 35 C: resumes compute execution
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 35, thermalStatus = 0)).isFalse()
+
+        // Normal temperature fluctuation back to 37 C: remains unthrottled until cutoff exceeded again
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 37, thermalStatus = 0)).isFalse()
+    }
+
+    @Test
+    fun testThermalStatusHysteresis_requiresStatusCoolDownToResume() {
+        val guard = ThermalSafetyGuard()
+
+        // Nominal status 1 (LIGHT)
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 30, thermalStatus = 1)).isFalse()
+
+        // Severe status 3: triggers throttling
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 30, thermalStatus = 3)).isTrue()
+
+        // Status drops to 2 (MODERATE): must remain throttled until <= resume threshold (1)
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 30, thermalStatus = 2)).isTrue()
+
+        // Status drops to 1 (LIGHT <= resume status): resumes
+        assertThat(guard.isThermalThrottled(temperatureCelsius = 30, thermalStatus = 1)).isFalse()
     }
 }

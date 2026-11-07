@@ -202,6 +202,66 @@ class WasmComputeEngineTest {
     }
 
     @Test
+    fun testEmptyBytecode_rejectedAsCorrupt(): Unit = runBlocking {
+        val engine = WasmComputeEngine()
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_wasm_empty")
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setTimeoutSeconds(5)
+            .setWasmBytecode(ByteString.EMPTY)
+            .build()
+
+        val result = engine.execute(task)
+        assertThat(result.isSuccess).isFalse()
+        assertThat(result.exitCode).isEqualTo(-1)
+        assertThat(result.errorCode).isEqualTo("PAYLOAD_CORRUPT")
+        assertThat(result.errorMessage).contains("Failed to parse WASM module")
+    }
+
+    @Test
+    fun testTruncatedWasmHeader_rejectedAsCorrupt(): Unit = runBlocking {
+        val engine = WasmComputeEngine()
+        // Only 4 bytes (magic header \0asm) missing the 4-byte version field
+        val truncatedBytes = byteArrayOf(0x00, 0x61, 0x73, 0x6d)
+
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_wasm_truncated")
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setTimeoutSeconds(5)
+            .setWasmBytecode(ByteString.copyFrom(truncatedBytes))
+            .build()
+
+        val result = engine.execute(task)
+        assertThat(result.isSuccess).isFalse()
+        assertThat(result.exitCode).isEqualTo(-1)
+        assertThat(result.errorCode).isEqualTo("PAYLOAD_CORRUPT")
+        assertThat(result.errorMessage).contains("Failed to parse WASM module")
+    }
+
+    @Test
+    fun testCorruptedSectionPayload_rejectedAsCorrupt(): Unit = runBlocking {
+        val engine = WasmComputeEngine()
+        // Valid 8-byte WASM header followed by corrupt section bytes
+        val corruptSectionBytes = byteArrayOf(
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // Valid header
+            0x7f, 0x01, 0x00 // Invalid section
+        )
+
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_wasm_corrupt_section")
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setTimeoutSeconds(5)
+            .setWasmBytecode(ByteString.copyFrom(corruptSectionBytes))
+            .build()
+
+        val result = engine.execute(task)
+        assertThat(result.isSuccess).isFalse()
+        assertThat(result.exitCode).isEqualTo(-1)
+        assertThat(result.errorCode).isEqualTo("PAYLOAD_CORRUPT")
+        assertThat(result.errorMessage).contains("Failed to parse WASM module")
+    }
+
+    @Test
     fun testMissingExplicitEntrypoint_reportsNotFoundError(): Unit = runBlocking {
         val engine = WasmComputeEngine()
         val fibBytecode = TestWasmBytecodeFixtures.FIBONACCI
