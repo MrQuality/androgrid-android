@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var viewModel: WorkerDashboardViewModel
     private lateinit var networkMonitor: NetworkRouteMonitor
+    private var thermalListener: com.androgrid.worker.telemetry.DeviceThermalStatusListener? = null
 
     private lateinit var statusBannerView: TextView
     private lateinit var nodeIdView: TextView
@@ -54,6 +55,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var osView: TextView
     private lateinit var sandboxView: TextView
     private lateinit var batteryView: TextView
+    private lateinit var thermalBadgeView: TextView
     private lateinit var telemetryView: TextView
     private lateinit var toggleButton: Button
     private lateinit var settingsButton: Button
@@ -141,6 +143,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         networkMonitor.stopMonitoring()
+        thermalListener?.stopListening()
     }
 
     private fun initDependencies() {
@@ -152,6 +155,11 @@ class MainActivity : ComponentActivity() {
         val systemInfo = AndroidSystemInfoProvider(applicationContext)
         val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
         val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
+
+        val deviceThermalListener = com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener(applicationContext).apply {
+            startListening()
+        }
+        thermalListener = deviceThermalListener
 
         val serviceController = AndroidServiceController(applicationContext)
         val workScheduler = AndroidWorkScheduler(applicationContext)
@@ -172,7 +180,8 @@ class MainActivity : ComponentActivity() {
             routeFlow = networkMonitor.currentRoute,
             capabilityProvider = capabilityProvider,
             batteryProvider = batteryProvider,
-            coordinator = coordinator
+            coordinator = coordinator,
+            thermalStatusListener = deviceThermalListener
         )
     }
 
@@ -212,6 +221,7 @@ class MainActivity : ComponentActivity() {
         osView = createMetricView()
         sandboxView = createMetricView()
         batteryView = createMetricView()
+        thermalBadgeView = createMetricView()
         telemetryView = createMetricView()
 
         rootLayout.addView(nodeIdView)
@@ -219,6 +229,7 @@ class MainActivity : ComponentActivity() {
         rootLayout.addView(osView)
         rootLayout.addView(sandboxView)
         rootLayout.addView(batteryView)
+        rootLayout.addView(thermalBadgeView)
         rootLayout.addView(telemetryView)
 
         toggleButton = Button(this).apply {
@@ -306,6 +317,9 @@ class MainActivity : ComponentActivity() {
         osView.text = "Platform: Android ${state.osVersion} (${state.abi})"
         sandboxView.text = "Sandbox Boundary: ${if (state.isRooted) "Rooted Access" else "WASM / Toybox Guarded"}"
         batteryView.text = "Power State: ${state.batteryFormatted()}"
+        val tempText = if (state.batteryTemperatureCelsius > 0) "${state.batteryTemperatureCelsius} C" else "N/A"
+        thermalBadgeView.text = "Thermal Guard: $tempText [${state.thermalStatusFormatted()}]"
+        thermalBadgeView.setTextColor(Color.parseColor(state.thermalBadgeColorHex()))
         telemetryView.text = "Tasks Executed: ${state.tasksCompletedCount}"
 
         if (state.isComputeActive) {

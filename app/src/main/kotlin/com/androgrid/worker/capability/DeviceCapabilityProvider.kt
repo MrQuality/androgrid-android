@@ -21,11 +21,15 @@ class DeviceCapabilityProvider(
      *
      * @param currentTransport active network transport type.
      * @param isMetered whether current connection is metered.
+     * @param batteryTemperatureCelsius current battery temperature in Celsius (default 0).
+     * @param thermalStatus current OS PowerManager thermal status (default 0).
      * @return fully validated NodeCapabilities protobuf instance.
      */
     fun buildCapabilities(
         currentTransport: NetworkTransportType,
-        isMetered: Boolean
+        isMetered: Boolean,
+        batteryTemperatureCelsius: Int = 0,
+        thermalStatus: Int = 0
     ): NodeCapabilities {
         val isRooted = rootChecker.isDeviceRooted()
         val engines = resolveSupportedEngines(isRooted)
@@ -44,6 +48,8 @@ class DeviceCapabilityProvider(
             .setIsMetered(isMetered)
             .setCurrentTransport(currentTransport)
             .setMaxCellularTaskDurationSeconds(ContractConstants.MAX_CELLULAR_TASK_DURATION_SECONDS)
+            .setBatteryTemperatureCelsius(batteryTemperatureCelsius)
+            .setThermalStatus(thermalStatus)
             .build()
     }
 

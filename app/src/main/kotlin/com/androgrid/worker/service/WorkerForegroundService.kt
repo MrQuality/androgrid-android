@@ -16,6 +16,7 @@ import com.androgrid.v1.RegisterNodeRequest
 import com.androgrid.v1.SyncNodeStateRequest
 import com.androgrid.v1.TaskExecutionReport
 import com.androgrid.v1.TaskState
+import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.capability.StandardRootChecker
@@ -23,6 +24,9 @@ import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.network.WifiSyncClient
+import com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener
+import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -135,9 +139,20 @@ class WorkerForegroundService : Service() {
             wifiClient = client
 
             val nodeId = "node_${Build.SERIAL.takeIf { it != "unknown" } ?: "android_wifi_worker"}"
+            val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
+            val thermalListener = AndroidDeviceThermalStatusListener(applicationContext).apply {
+                startListening()
+            }
+            val thermalGuard = ThermalSafetyGuard()
+
+            val initialBattery = batteryProvider.getBatteryStatus()
+            val initialThermal = thermalListener.currentThermalStatus
+
             val capabilities = capabilityProvider.buildCapabilities(
                 currentTransport = NetworkTransportType.NETWORK_TRANSPORT_WIFI_LAN,
-                isMetered = false
+                isMetered = false,
+                batteryTemperatureCelsius = initialBattery.temperatureCelsius,
+                thermalStatus = initialThermal
             )
 
             // Step 1: Register node per [REQ-OP-001]
@@ -150,6 +165,7 @@ class WorkerForegroundService : Service() {
             val regResult = client.registerNode(regRequest)
             if (regResult.isFailure) {
                 // If registration fails, wait before retry
+                thermalListener.stopListening()
                 delay(SYNC_INTERVAL_MS)
                 return@launch
             }
@@ -158,6 +174,10 @@ class WorkerForegroundService : Service() {
 
             // Step 2: 2.0-second declarative synchronization loop per [REQ-OP-002]
             while (isActive) {
+                val currentBattery = batteryProvider.getBatteryStatus()
+                val currentThermal = thermalListener.currentThermalStatus
+                val isThrottled = thermalGuard.isThermalThrottled(currentBattery.temperatureCelsius, currentThermal)
+
                 val reportsToSend = mutableListOf<TaskExecutionReport>()
                 while (completedReports.isNotEmpty()) {
                     completedReports.poll()?.let { reportsToSend.add(it) }
@@ -170,7 +190,7 @@ class WorkerForegroundService : Service() {
                     .build()
 
                 val syncResult = client.syncNodeState(syncRequest)
-                if (syncResult.isSuccess) {
+                if (syncResult.isSuccess && !isThrottled) {
                     val response = syncResult.getOrNull()
                     response?.desiredTasksList?.forEach { desiredTask ->
                         // Dispatch assigned task concurrently in background

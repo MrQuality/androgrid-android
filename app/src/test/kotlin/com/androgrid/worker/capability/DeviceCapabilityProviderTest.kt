@@ -114,4 +114,22 @@ class DeviceCapabilityProviderTest {
 
         assertThat(capabilities.cpuCores).isEqualTo(1)
     }
+
+    @Test
+    fun testThermalTelemetryReporting_propagatesBatteryTempAndThermalStatus() {
+        val provider = DeviceCapabilityProvider(
+            rootChecker = FakeRootChecker(rooted = false),
+            systemInfoProvider = FakeSystemInfoProvider()
+        )
+
+        val capabilities = provider.buildCapabilities(
+            currentTransport = NetworkTransportType.NETWORK_TRANSPORT_CELLULAR_WAN,
+            isMetered = true,
+            batteryTemperatureCelsius = 36,
+            thermalStatus = 2
+        )
+
+        assertThat(capabilities.batteryTemperatureCelsius).isEqualTo(36)
+        assertThat(capabilities.thermalStatus).isEqualTo(2)
+    }
 }
