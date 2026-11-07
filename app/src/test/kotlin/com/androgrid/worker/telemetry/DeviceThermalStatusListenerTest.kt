@@ -31,7 +31,7 @@ class DeviceThermalStatusListenerTest {
     fun testApi34_initialStatusAndListeningLifecycle() {
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         val shadowPower = Shadows.shadowOf(powerManager)
-        shadowPower.setThermalStatus(PowerManager.THERMAL_STATUS_NONE)
+        shadowPower.setCurrentThermalStatus(PowerManager.THERMAL_STATUS_NONE)
 
         val listener = AndroidDeviceThermalStatusListener(context)
         assertThat(listener.currentThermalStatus).isEqualTo(PowerManager.THERMAL_STATUS_NONE)
@@ -39,7 +39,7 @@ class DeviceThermalStatusListenerTest {
         listener.startListening()
 
         // Simulate thermal status change to SEVERE (3)
-        shadowPower.setThermalStatus(PowerManager.THERMAL_STATUS_SEVERE)
+        shadowPower.setCurrentThermalStatus(PowerManager.THERMAL_STATUS_SEVERE)
         assertThat(listener.currentThermalStatus).isEqualTo(PowerManager.THERMAL_STATUS_SEVERE)
         assertThat(listener.thermalStatusFlow.value).isEqualTo(PowerManager.THERMAL_STATUS_SEVERE)
 
