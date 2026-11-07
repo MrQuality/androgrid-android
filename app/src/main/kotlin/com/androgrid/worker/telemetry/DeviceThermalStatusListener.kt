@@ -56,7 +56,21 @@ class AndroidDeviceThermalStatusListener(
     private var api29Helper: Api29ThermalListenerHelper? = null
 
     override val currentThermalStatus: Int
-        get() = _thermalStatusFlow.value
+        get() {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null) {
+                try {
+                    val status = powerManager.currentThermalStatus
+                    if (_thermalStatusFlow.value != status) {
+                        _thermalStatusFlow.value = status
+                    }
+                    status
+                } catch (_: Exception) {
+                    _thermalStatusFlow.value
+                }
+            } else {
+                _thermalStatusFlow.value
+            }
+        }
 
     @Synchronized
     override fun startListening() {
@@ -93,7 +107,12 @@ class AndroidDeviceThermalStatusListener(
         }
 
         fun register(executor: Executor) {
-            powerManager.addThermalStatusListener(executor, listener)
+            try {
+                powerManager.addThermalStatusListener(executor, listener)
+            } catch (_: Exception) {
+                // Catch "Listener failed to set" or RemoteException on emulators, test runners,
+                // or vendor ROMs with incomplete thermal HAL implementations.
+            }
         }
 
         fun unregister() {
