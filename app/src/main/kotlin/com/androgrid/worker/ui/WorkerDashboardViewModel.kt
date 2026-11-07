@@ -7,6 +7,7 @@ import com.androgrid.worker.capability.BatteryStatusProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.network.NetworkRoute
 import com.androgrid.worker.service.WorkerLifecycleCoordinator
+import com.androgrid.worker.telemetry.DeviceThermalStatusListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,14 +16,15 @@ import kotlinx.coroutines.launch
 /**
  * ViewModel managing worker dashboard UI state and user participation lifecycle.
  *
- * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002]
+ * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002], [INV-003], [NFR-POW-001]
  */
 class WorkerDashboardViewModel(
     private val nodeId: String,
     private val routeFlow: StateFlow<NetworkRoute>,
     private val capabilityProvider: DeviceCapabilityProvider,
     private val batteryProvider: BatteryStatusProvider,
-    private val coordinator: WorkerLifecycleCoordinator
+    private val coordinator: WorkerLifecycleCoordinator,
+    private val thermalStatusListener: DeviceThermalStatusListener? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(createInitialState())
@@ -35,6 +37,19 @@ class WorkerDashboardViewModel(
                 onRouteChanged(route)
             }
         }
+
+        // Observe thermal status transitions
+        viewModelScope.launch {
+            thermalStatusListener?.thermalStatusFlow?.collect { thermalStatus ->
+                val battery = batteryProvider.getBatteryStatus()
+                _uiState.value = _uiState.value.copy(
+                    batteryPercent = battery.levelPercent,
+                    isCharging = battery.isCharging,
+                    batteryTemperatureCelsius = battery.temperatureCelsius,
+                    thermalStatus = thermalStatus
+                )
+            }
+        }
     }
 
     private fun createInitialState(): WorkerDashboardState {
@@ -43,6 +58,7 @@ class WorkerDashboardViewModel(
             isMetered = false
         )
         val battery = batteryProvider.getBatteryStatus()
+        val thermalStatus = thermalStatusListener?.currentThermalStatus ?: 0
 
         return WorkerDashboardState(
             nodeId = nodeId,
@@ -55,6 +71,8 @@ class WorkerDashboardViewModel(
             abi = caps.abi,
             batteryPercent = battery.levelPercent,
             isCharging = battery.isCharging,
+            batteryTemperatureCelsius = battery.temperatureCelsius,
+            thermalStatus = thermalStatus,
             tasksCompletedCount = 0,
             statusBannerText = "Offline: Execution Paused"
         )
@@ -68,12 +86,15 @@ class WorkerDashboardViewModel(
         }
 
         val battery = batteryProvider.getBatteryStatus()
+        val thermalStatus = thermalStatusListener?.currentThermalStatus ?: _uiState.value.thermalStatus
 
         _uiState.value = _uiState.value.copy(
             route = route,
             statusBannerText = bannerText,
             batteryPercent = battery.levelPercent,
-            isCharging = battery.isCharging
+            isCharging = battery.isCharging,
+            batteryTemperatureCelsius = battery.temperatureCelsius,
+            thermalStatus = thermalStatus
         )
 
         // If compute participation is enabled, propagate to coordinator

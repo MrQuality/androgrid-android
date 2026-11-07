@@ -1,11 +1,13 @@
 package com.androgrid.worker.service
 
 import android.content.Context
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
 import com.androgrid.v1.ClaimCellularTaskRequest
 import com.androgrid.v1.NetworkTransportType
@@ -18,12 +20,16 @@ import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.network.CellularTransportClient
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
+import com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener
+import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import io.grpc.ManagedChannel
+import java.util.concurrent.TimeUnit
 
 /**
  * Pure testable logic for cellular spot worker execution.
- * Enforces battery preconditions ([REQ-OP-003]), offline execution ([INV-003]),
- * and atomic result submission ([REQ-OP-004]).
+ * Enforces battery preconditions ([REQ-OP-003]), thermal safety bounds ([INV-003], [NFR-POW-001]),
+ * offline execution ([INV-003]), and atomic result submission ([REQ-OP-004]).
  *
  * Traces to: [INV-001], [INV-002], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001], [NFR-SEC-001]
  */
@@ -33,12 +39,15 @@ class CellularSpotWorkerLogic(
     private val capabilityProvider: DeviceCapabilityProvider,
     private val cellularClient: CellularTransportClient = CellularTransportClient(),
     private val dispatcher: TaskExecutionDispatcher = TaskExecutionDispatcher(),
-    private val channelProvider: (() -> ManagedChannel)? = null
+    private val channelProvider: (() -> ManagedChannel)? = null,
+    private val thermalListener: DeviceThermalStatusListener? = null,
+    private val thermalGuard: ThermalSafetyGuard = ThermalSafetyGuard()
 ) {
     /**
-     * Executes single spot task cycle: battery check -> claim -> execute -> submit.
+     * Executes single spot task cycle: battery & thermal checks -> claim -> execute -> submit.
+     * Postpones execution with Result.retry() if battery temperature > 38 C or OS reports thermal throttling.
      *
-     * @return Result.success() on completion or stale attempt; Result.retry() on transient errors.
+     * @return Result.success() on completion or stale attempt; Result.retry() on transient errors or thermal throttling.
      */
     suspend fun executeSpotTask(): androidx.work.ListenableWorker.Result {
         // Step 1: Precondition check per [REQ-OP-003] (battery >= 20% or charging)
@@ -47,10 +56,19 @@ class CellularSpotWorkerLogic(
             return androidx.work.ListenableWorker.Result.success()
         }
 
-        // Step 2: Build claim request
+        // Step 2: Client-side thermal safety guard per [INV-003], [NFR-POW-001]
+        val thermalStatus = thermalListener?.currentThermalStatus ?: 0
+        if (thermalGuard.isThermalThrottled(battery.temperatureCelsius, thermalStatus)) {
+            // Postpone compute when device battery temperature > 38 C or OS thermal status elevated
+            return androidx.work.ListenableWorker.Result.retry()
+        }
+
+        // Step 3: Build claim request
         val capabilities = capabilityProvider.buildCapabilities(
             currentTransport = NetworkTransportType.NETWORK_TRANSPORT_CELLULAR_WAN,
-            isMetered = true
+            isMetered = true,
+            batteryTemperatureCelsius = battery.temperatureCelsius,
+            thermalStatus = thermalStatus
         )
 
         val claimRequest = ClaimCellularTaskRequest.newBuilder()
@@ -58,9 +76,11 @@ class CellularSpotWorkerLogic(
             .setCapabilities(capabilities)
             .setBatteryLevelPct(battery.levelPercent)
             .setIsCharging(battery.isCharging)
+            .setBatteryTemperatureCelsius(battery.temperatureCelsius)
+            .setThermalStatus(thermalStatus)
             .build()
 
-        // Step 3: Unary task claim over ephemeral channel (channel closes immediately)
+        // Step 4: Unary task claim over ephemeral channel (channel closes immediately)
         val claimResult = if (channelProvider != null) {
             val channel = channelProvider.invoke()
             cellularClient.claimTaskWithChannel(channel, claimRequest)
@@ -77,11 +97,11 @@ class CellularSpotWorkerLogic(
             return androidx.work.ListenableWorker.Result.success()
         }
 
-        // Step 4: Offline compute execution via sandboxed dispatcher
+        // Step 5: Offline compute execution via sandboxed dispatcher
         val task = claimResponse.task
         val executionResult = dispatcher.dispatch(task)
 
-        // Step 5: Atomic result submission over new ephemeral channel
+        // Step 6: Atomic result submission over new ephemeral channel
         val submitRequest = executionResult.toSubmitCellularResultRequest(
             nodeId = nodeId,
             taskId = task.taskId,
@@ -111,7 +131,7 @@ class CellularSpotWorkerLogic(
 
 /**
  * Android Jetpack CoroutineWorker for cellular spot task execution.
- * Enforces zero-keepalive radio sleep and background WorkManager constraints.
+ * Enforces zero-keepalive radio sleep, thermal safety monitoring, and background WorkManager constraints.
  *
  * Traces to: [INV-001], [INV-002], [INV-003], [REQ-OP-003], [REQ-OP-004], [NFR-POW-001], [NFR-SEC-001]
  */
@@ -125,6 +145,9 @@ class CellularSpotWorker(
         val systemInfo = AndroidSystemInfoProvider(appContext)
         val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
         val batteryProvider = AndroidBatteryStatusProvider(appContext)
+        val thermalListener = AndroidDeviceThermalStatusListener(appContext).apply {
+            startListening()
+        }
 
         val settingsRepo = SharedPreferencesClusterSettingsRepository.getInstance(appContext)
         val settings = settingsRepo.getSettings()
@@ -139,7 +162,8 @@ class CellularSpotWorker(
             nodeId = "node_${android.os.Build.SERIAL.takeIf { it != "unknown" } ?: "android_worker"}",
             batteryProvider = batteryProvider,
             capabilityProvider = capabilityProvider,
-            cellularClient = cellularClient
+            cellularClient = cellularClient,
+            thermalListener = thermalListener
         )
     }
 
@@ -152,7 +176,7 @@ class CellularSpotWorker(
 
         /**
          * Builds constrained WorkRequest for cellular spot execution.
-         * Enforces connected network constraint.
+         * Enforces connected network constraint and exponential backoff retry policy.
          */
         fun buildWorkRequest(): OneTimeWorkRequest {
             val constraints = Constraints.Builder()
@@ -161,6 +185,11 @@ class CellularSpotWorker(
 
             return OneTimeWorkRequestBuilder<CellularSpotWorker>()
                 .setConstraints(constraints)
+                .setBackoffCriteria(
+                    BackoffPolicy.EXPONENTIAL,
+                    WorkRequest.MIN_BACKOFF_MILLIS,
+                    TimeUnit.MILLISECONDS
+                )
                 .build()
         }
     }

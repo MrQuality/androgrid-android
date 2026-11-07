@@ -6,13 +6,14 @@ import android.content.IntentFilter
 import android.os.BatteryManager
 
 /**
- * Model representing device battery level and charging state.
+ * Model representing device battery level, charging state, and temperature.
  *
- * Traces to: [REQ-OP-003]
+ * Traces to: [REQ-OP-003], [NFR-POW-001]
  */
 data class BatteryStatus(
     val levelPercent: Int,
-    val isCharging: Boolean
+    val isCharging: Boolean,
+    val temperatureCelsius: Int = 0
 )
 
 /**
@@ -30,35 +31,16 @@ interface BatteryStatusProvider {
 }
 
 /**
- * Standard Android battery status provider querying ACTION_BATTERY_CHANGED intent.
+ * Standard Android battery status provider delegating to AndroidBatteryThermalMonitor.
  *
- * Traces to: [REQ-OP-003]
+ * Traces to: [REQ-OP-003], [NFR-POW-001]
  */
 class AndroidBatteryStatusProvider(
-    private val context: Context
+    private val context: Context,
+    private val monitor: BatteryStatusProvider = com.androgrid.worker.telemetry.AndroidBatteryThermalMonitor(context)
 ) : BatteryStatusProvider {
 
     override fun getBatteryStatus(): BatteryStatus {
-        return try {
-            val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-            val batteryStatusIntent = context.registerReceiver(null, intentFilter)
-
-            val level = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-            val scale = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-            val status = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-
-            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                    status == BatteryManager.BATTERY_STATUS_FULL
-
-            val levelPercent = if (level >= 0 && scale > 0) {
-                ((level.toFloat() / scale.toFloat()) * 100f).toInt()
-            } else {
-                100 // Fallback if battery manager unavailable
-            }
-
-            BatteryStatus(levelPercent = levelPercent, isCharging = isCharging)
-        } catch (_: Exception) {
-            BatteryStatus(levelPercent = 100, isCharging = true)
-        }
+        return monitor.getBatteryStatus()
     }
 }

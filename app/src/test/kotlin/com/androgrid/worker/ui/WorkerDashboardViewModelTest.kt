@@ -10,10 +10,12 @@ import com.androgrid.worker.network.NetworkRoute
 import com.androgrid.worker.service.ServiceController
 import com.androgrid.worker.service.WorkScheduler
 import com.androgrid.worker.service.WorkerLifecycleCoordinator
+import com.androgrid.worker.telemetry.DeviceThermalStatusListener
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -44,8 +46,25 @@ class WorkerDashboardViewModelTest {
         override fun supportedAbi(): String = "arm64-v8a"
     }
 
-    private class FakeBatteryProvider(var level: Int = 85, var charging: Boolean = false) : BatteryStatusProvider {
-        override fun getBatteryStatus(): BatteryStatus = BatteryStatus(level, charging)
+    private class FakeBatteryProvider(
+        var level: Int = 85,
+        var charging: Boolean = false,
+        var temp: Int = 0
+    ) : BatteryStatusProvider {
+        override fun getBatteryStatus(): BatteryStatus = BatteryStatus(level, charging, temp)
+    }
+
+    private class FakeThermalListener(
+        override var currentThermalStatus: Int = 0
+    ) : DeviceThermalStatusListener {
+        val flow = MutableStateFlow(currentThermalStatus)
+        override val thermalStatusFlow: StateFlow<Int> = flow
+        override fun startListening() {}
+        override fun stopListening() {}
+        fun updateStatus(status: Int) {
+            currentThermalStatus = status
+            flow.value = status
+        }
     }
 
     private class RecordingServiceController : ServiceController {
@@ -187,5 +206,67 @@ class WorkerDashboardViewModelTest {
         viewModel.incrementCompletedTasks()
 
         assertThat(viewModel.uiState.value.tasksCompletedCount).isEqualTo(2)
+    }
+
+    @Test
+    fun testThermalTelemetry_initialStateAndFormatting() = runTest {
+        val routeFlow = MutableStateFlow<NetworkRoute>(NetworkRoute.Offline)
+        val thermalListener = FakeThermalListener(currentThermalStatus = 0)
+        val batteryProvider = FakeBatteryProvider(level = 80, charging = true, temp = 34)
+
+        val viewModel = WorkerDashboardViewModel(
+            nodeId = "node_test_pixel",
+            routeFlow = routeFlow,
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            batteryProvider = batteryProvider,
+            coordinator = WorkerLifecycleCoordinator(routeFlow, RecordingServiceController(), RecordingWorkScheduler()),
+            thermalStatusListener = thermalListener
+        )
+
+        val state = viewModel.uiState.value
+        assertThat(state.batteryTemperatureCelsius).isEqualTo(34)
+        assertThat(state.thermalStatus).isEqualTo(0)
+        assertThat(state.batteryFormatted()).contains("34 C")
+        assertThat(state.batteryFormatted()).contains("(Charging)")
+        assertThat(state.thermalStatusFormatted()).isEqualTo("Nominal")
+        assertThat(state.thermalBadgeColorHex()).isEqualTo("#2E7D32") // Green (< 35 C)
+
+        // Test warning/yellow badge (35-38 C)
+        val warningState = state.copy(batteryTemperatureCelsius = 36)
+        assertThat(warningState.thermalBadgeColorHex()).isEqualTo("#F57F17") // Yellow
+
+        // Test critical/red badge (> 38 C)
+        val hotState = state.copy(batteryTemperatureCelsius = 40)
+        assertThat(hotState.thermalBadgeColorHex()).isEqualTo("#C62828") // Red
+
+        // Test severe thermal status red badge
+        val severeState = state.copy(batteryTemperatureCelsius = 30, thermalStatus = 3)
+        assertThat(severeState.thermalBadgeColorHex()).isEqualTo("#C62828") // Red
+        assertThat(severeState.thermalStatusFormatted()).isEqualTo("Severe Throttling")
+    }
+
+    @Test
+    fun testThermalStatusTransition_updatesUiState() = runTest {
+        val routeFlow = MutableStateFlow<NetworkRoute>(NetworkRoute.Offline)
+        val thermalListener = FakeThermalListener(currentThermalStatus = 0)
+        val batteryProvider = FakeBatteryProvider(level = 90, charging = false, temp = 33)
+
+        val viewModel = WorkerDashboardViewModel(
+            nodeId = "node_test_pixel",
+            routeFlow = routeFlow,
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            batteryProvider = batteryProvider,
+            coordinator = WorkerLifecycleCoordinator(routeFlow, RecordingServiceController(), RecordingWorkScheduler()),
+            thermalStatusListener = thermalListener
+        )
+
+        assertThat(viewModel.uiState.value.thermalStatus).isEqualTo(0)
+
+        // Transition thermal status to 3 (SEVERE)
+        thermalListener.updateStatus(3)
+        testScheduler.advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.thermalStatus).isEqualTo(3)
+        assertThat(viewModel.uiState.value.thermalBadgeColorHex()).isEqualTo("#C62828")
     }
 }

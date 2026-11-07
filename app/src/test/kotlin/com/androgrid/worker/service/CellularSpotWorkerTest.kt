@@ -1,5 +1,6 @@
 package com.androgrid.worker.service
 
+import androidx.work.BackoffPolicy
 import androidx.work.ListenableWorker
 import com.androgrid.v1.ClaimCellularTaskRequest
 import com.androgrid.v1.ClaimCellularTaskResponse
@@ -17,11 +18,15 @@ import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.engine.TaskExecutionResult
 import com.androgrid.worker.network.CellularRpcInvoker
 import com.androgrid.worker.network.CellularTransportClient
+import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.ByteString
 import io.grpc.ManagedChannel
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import java.util.concurrent.TimeUnit
@@ -58,6 +63,15 @@ class CellularSpotWorkerTest {
             status = newStatus
         }
         override fun getBatteryStatus(): BatteryStatus = status
+    }
+
+    private class FakeThermalListener(
+        override var currentThermalStatus: Int = 0
+    ) : DeviceThermalStatusListener {
+        private val _flow = MutableStateFlow(currentThermalStatus)
+        override val thermalStatusFlow: StateFlow<Int> = _flow
+        override fun startListening() {}
+        override fun stopListening() {}
     }
 
     private class FakeRootChecker : RootChecker {
@@ -264,5 +278,108 @@ class CellularSpotWorkerTest {
         val result = workerLogic.executeSpotTask()
 
         assertThat(result).isEqualTo(ListenableWorker.Result.retry())
+    }
+
+    @Test
+    fun testHighBatteryTemperature_postponesExecutionWithRetry() = runTest {
+        // Enforces [INV-003], [NFR-POW-001]: Battery temp > 38 C postpones execution
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).build())
+        )
+        val batteryProvider = FakeBatteryProvider(
+            BatteryStatus(levelPercent = 80, isCharging = false, temperatureCelsius = 39)
+        )
+        val thermalListener = FakeThermalListener(currentThermalStatus = 0)
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            thermalListener = thermalListener,
+            thermalGuard = ThermalSafetyGuard()
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        // Postpones execution with retry, bypassing RPC claim
+        assertThat(result).isEqualTo(ListenableWorker.Result.retry())
+        assertThat(rpc.lastClaimRequest).isNull()
+    }
+
+    @Test
+    fun testElevatedThermalStatus_postponesExecutionWithRetry() = runTest {
+        // Enforces [INV-003], [NFR-POW-001]: OS thermal status >= 3 postpones execution
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).build())
+        )
+        val batteryProvider = FakeBatteryProvider(
+            BatteryStatus(levelPercent = 80, isCharging = false, temperatureCelsius = 30)
+        )
+        val thermalListener = FakeThermalListener(currentThermalStatus = 3) // SEVERE throttling
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            thermalListener = thermalListener,
+            thermalGuard = ThermalSafetyGuard()
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.retry())
+        assertThat(rpc.lastClaimRequest).isNull()
+    }
+
+    @Test
+    fun testNominalThermalConditions_claimsTaskWithTelemetryInRequest() = runTest {
+        // Enforces [REQ-OP-003]: Telemetry is wired into ClaimCellularTaskRequest
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(false).build()
+            )
+        )
+        val batteryProvider = FakeBatteryProvider(
+            BatteryStatus(levelPercent = 80, isCharging = false, temperatureCelsius = 32)
+        )
+        val thermalListener = FakeThermalListener(currentThermalStatus = 1) // LIGHT throttling
+        val client = CellularTransportClient(rpcInvoker = rpc)
+        val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
+
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = batteryProvider,
+            capabilityProvider = capabilityProvider,
+            cellularClient = client,
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            thermalListener = thermalListener,
+            thermalGuard = ThermalSafetyGuard()
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        assertThat(rpc.lastClaimRequest).isNotNull()
+        assertThat(rpc.lastClaimRequest?.batteryTemperatureCelsius).isEqualTo(32)
+        assertThat(rpc.lastClaimRequest?.thermalStatus).isEqualTo(1)
+        assertThat(rpc.lastClaimRequest?.capabilities?.batteryTemperatureCelsius).isEqualTo(32)
+        assertThat(rpc.lastClaimRequest?.capabilities?.thermalStatus).isEqualTo(1)
+    }
+
+    @Test
+    fun testWorkRequestConfiguration_enforcesExponentialBackoffCriteria() {
+        val request = CellularSpotWorker.buildWorkRequest()
+        assertThat(request.workSpec.backoffPolicy).isEqualTo(BackoffPolicy.EXPONENTIAL)
     }
 }
