@@ -1,6 +1,7 @@
 package com.androgrid.worker.documentation
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import org.junit.Test
 import java.io.File
 
@@ -101,11 +102,11 @@ class DocumentationIntegrityTest {
         for (file in files) {
             val lines = file.readLines(Charsets.UTF_8)
             for ((idx, line) in lines.withIndex()) {
-                assertThat(line.contains('\u2014'))
-                    .named("Forbidden em dash (U+2014) in ${file.name}:${idx + 1}")
+                assertWithMessage("Forbidden em dash (U+2014) in ${file.name}:${idx + 1}")
+                    .that(line.contains('\u2014'))
                     .isFalse()
-                assertThat(line.contains('\u2013'))
-                    .named("Forbidden en dash (U+2013) in ${file.name}:${idx + 1}")
+                assertWithMessage("Forbidden en dash (U+2013) in ${file.name}:${idx + 1}")
+                    .that(line.contains('\u2013'))
                     .isFalse()
             }
         }
