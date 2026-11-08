@@ -310,6 +310,29 @@ tr:hover td {
     color: var(--violet);
 }
 
+.doc-image {
+    margin: 2rem auto;
+    text-align: center;
+    max-width: 100%;
+}
+
+.doc-image img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    display: block;
+    margin: 0 auto;
+}
+
+.doc-image figcaption {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
 .footer {
     text-align: center;
     padding: 2.5rem 1rem;
@@ -434,6 +457,13 @@ def markdown_to_html(md_text: str) -> str:
             html_lines.append(f"<h1>{stripped[2:]}</h1>")
         elif stripped == "---":
             html_lines.append("<hr style='border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 2rem 0;'>")
+        elif re.match(r"^!\[(.*?)\]\((.*?)\)$", stripped):
+            img_match = re.match(r"^!\[(.*?)\]\((.*?)\)$", stripped)
+            alt, src = img_match.group(1), img_match.group(2)
+            if alt:
+                html_lines.append(f'<figure class="doc-image"><img src="{src}" alt="{alt}"><figcaption>{alt}</figcaption></figure>')
+            else:
+                html_lines.append(f'<figure class="doc-image"><img src="{src}" alt=""></figure>')
         elif stripped:
             html_lines.append(f"<p>{stripped}</p>")
 
@@ -443,9 +473,19 @@ def markdown_to_html(md_text: str) -> str:
         html_lines.append("</ul>")
 
     content = "\n".join(html_lines)
+    # Convert inline images
+    def inline_img_replace(match):
+        alt_text = match.group(1)
+        src_url = match.group(2)
+        if alt_text:
+            return f'<figure class="doc-image"><img src="{src_url}" alt="{alt_text}"><figcaption>{alt_text}</figcaption></figure>'
+        return f'<figure class="doc-image"><img src="{src_url}" alt=""></figure>'
+
+    content = re.sub(r"!\[(.*?)\]\((.*?)\)", inline_img_replace, content)
     # Convert inline code and strong
     content = re.sub(r"`([^`]+)`", r"<code>\1</code>", content)
     content = re.sub(r"\*\*([^\*]+)\*\*", r"<strong>\1</strong>", content)
+    content = re.sub(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', content)
     return content
 
 
@@ -494,7 +534,19 @@ def assemble_site(project_root: Path, output_dir: Path):
         (dokka_dest / "index.html").write_text(placeholder, encoding="utf-8")
         print("[*] Created placeholder for dokka/index.html")
 
-    # 6. Sanitize typographic dashes
+    # 6. Copy static assets (e.g. diagrams, illustrations) if present
+    assets_src = project_root / "docs" / "assets"
+    assets_dest = output_dir / "assets"
+    if assets_src.exists():
+        if assets_dest.exists():
+            shutil.rmtree(assets_dest)
+        shutil.copytree(assets_src, assets_dest)
+        print(f"[+] Copied documentation assets from {assets_src} to {assets_dest}")
+    else:
+        assets_dest.mkdir(parents=True, exist_ok=True)
+        print("[*] Created assets directory at site/assets")
+
+    # 7. Sanitize typographic dashes
     forbidden = re.compile(r"[\u2013\u2014]")
     errors = 0
     for file in output_dir.rglob("*"):
