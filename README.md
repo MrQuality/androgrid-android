@@ -5,9 +5,9 @@
 [![MinSDK](https://img.shields.io/badge/Min%20SDK-API%2028-yellow.svg)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0%2B-purple.svg)](https://kotlinlang.org)
 [![gRPC](https://img.shields.io/badge/gRPC-Kotlin%201.4-blue.svg)](https://github.com/grpc/grpc-kotlin)
-[![WASI](https://img.shields.io/badge/Engine-Wasmtime%20%2F%20WASI-red.svg)](https://wasmtime.dev)
+[![WASI](https://img.shields.io/badge/Engine-Chicory%20%2F%20WASI%20P1-orange.svg)](https://github.com/dylibso/chicory)
 
-The distributed mobile edge compute worker for **AndroGrid**: executing isolated WebAssembly (WASI) modules and privileged shell tasks on Android devices orchestrated by a central Rust control plane over mutual-TLS 1.3.
+The distributed mobile edge compute worker for **AndroGrid**: executing isolated WebAssembly (WASI Preview 1) modules and privileged shell tasks on Android devices orchestrated by a central Rust control plane over mutual-TLS 1.3.
 
 ---
 
@@ -16,7 +16,7 @@ The distributed mobile edge compute worker for **AndroGrid**: executing isolated
 - **Zero Inbound Mobile Ports (`[INV-001]`):** The worker node never binds to, listens on, or exposes server sockets. All cluster communication originates outbound from the mobile device to the control plane.
 - **Zero Cellular Keepalive and Radio Sleep (`[INV-003]`, `[NFR-POW-001]`):** When operating over metered Cellular WAN, the worker actively terminates underlying gRPC HTTP/2 channels within 200 ms of task receipt, enabling the cellular baseband radio to drop into low-power RRC idle sleep during local execution.
 - **Android 14+ Typed Foreground Services (`[REQ-VER-001]`):** Implements modern foreground service architectures using `FOREGROUND_SERVICE_TYPE_DATA_SYNC` with backward compatibility down to Android 9 (API 28).
-- **In-Memory WebAssembly Sandbox (`[INV-006]`, `[REQ-VER-003]`):** Unrooted devices execute compute payloads strictly inside an embedded WASI runtime via JNI. Bytecode is evaluated in memory via `memfd_create` and anonymous pages, respecting strict Android SELinux W^X memory policies.
+- **In-Memory WebAssembly Sandbox (`[INV-006]`, `[REQ-VER-003]`):** Unrooted devices execute compute payloads strictly inside an embedded pure-JVM Chicory WebAssembly/WASI Preview 1 runtime. Bytecode is evaluated entirely in memory without writing, emitting, or executing dynamic shared libraries (`.so`) on writable storage, strictly upholding Android SELinux W^X memory policies.
 - **Dual-Route Interface Monitoring:** Dynamically transitions between high-throughput Wi-Fi declarative state loops and ephemeral cellular unary requests.
 
 ---
@@ -28,7 +28,7 @@ The distributed mobile edge compute worker for **AndroGrid**: executing isolated
 - **Language and Concurrency:** Kotlin 2.0+, Coroutines, Kotlin Flow
 - **Background Orchestration:** Jetpack WorkManager 2.9+, AndroidX ServiceCompat
 - **RPC and Transport:** `grpc-kotlin-stub`, `grpc-protobuf-lite`, OkHttp Transport with TLS 1.3
-- **Compute Sandboxes:** Android NDK r26+, Embedded Wasmtime C-API via JNI, Toybox shell engine
+- **Compute Sandboxes:** Chicory Pure-JVM WASI Preview 1 Interpreter (in-memory execution), Toybox unprivileged user shell, Root shell (rooted hardware only)
 
 ---
 
@@ -37,7 +37,6 @@ The distributed mobile edge compute worker for **AndroGrid**: executing isolated
 ### Prerequisites
 - **Android Studio:** Hedgehog (2023.1.1) or newer
 - **Java Development Kit:** OpenJDK 17 or 21
-- **Android NDK:** r26+ (`26.1.10909125`)
 - **Android SDK:** Platform API 34, Build Tools 34.0.0
 
 ### Building the Application
@@ -66,8 +65,7 @@ androgrid-android/
 │   │   │   └── com/androgrid/
 │   │   │       ├── service/  # Typed Foreground Services & WorkManager
 │   │   │       ├── network/  # Dual-route transport & TLS 1.3 channel
-│   │   │       └── engine/   # WASI sandbox & native execution bridge
-│   │   ├── cpp/              # NDK JNI bridge to embedded WASI runtime
+│   │   │       └── engine/   # Chicory WASI sandbox & execution engines
 │   │   └── AndroidManifest.xml
 │   └── src/test/             # Robolectric & Coroutines test suites
 ├── gradle/                   # Gradle wrapper
