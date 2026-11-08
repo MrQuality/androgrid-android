@@ -27,7 +27,7 @@ jobs:
       - name: Audit Typographic Standards (Zero Em/En Dashes)
         run: |
           echo "Scanning for forbidden em dashes and en dashes..."
-          if grep -rnP '[\x{2013}\x{2014}]' app/src/ build.gradle.kts settings.gradle.kts; then
+          if grep -rnP '[\x{2013}\x{2014}]' app/src/ build.gradle.kts settings.gradle.kts docs/; then
             echo "Error: Forbidden em dash or en dash detected!"
             exit 1
           fi
@@ -35,3 +35,6 @@ jobs:
 
       - name: Run Unit Tests and Invariant Audits
         run: gradle testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Generate Dokka KDoc API Documentation
+        run: gradle dokkaHtml --no-daemon --stacktrace
