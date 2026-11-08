@@ -111,4 +111,19 @@ class DocumentationIntegrityTest {
             }
         }
     }
+
+    @Test
+    fun testGitHubPagesWorkflowIntegrity() {
+        var dir = File(".").canonicalFile
+        while (dir.parentFile != null && !File(dir, ".github").exists()) {
+            dir = dir.parentFile
+        }
+        val pagesFile = File(dir, ".github/workflows/pages.yml")
+        assertThat(pagesFile.exists()).isTrue()
+
+        val content = pagesFile.readText(Charsets.UTF_8)
+        assertThat(content).contains("dokkaHtml")
+        assertThat(content).contains("deploy-pages")
+        assertThat(content).contains("assemble_pages.py")
+    }
 }
