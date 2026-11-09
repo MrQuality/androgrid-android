@@ -27,7 +27,7 @@ jobs:
       - name: Audit Typographic Standards (Zero Em/En Dashes)
         run: |
           echo "Scanning for forbidden em dashes and en dashes..."
-          if grep -rnP '[\x{2013}\x{2014}]' app/src/ build.gradle.kts settings.gradle.kts docs/; then
+          if grep -rnP '[\x{2013}\x{2014}]' app/src/ build.gradle.kts settings.gradle.kts docs/ .github/; then
             echo "Error: Forbidden em dash or en dash detected!"
             exit 1
           fi

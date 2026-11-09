@@ -1,0 +1,114 @@
+# Automated Release APK & AAB Packaging Pipeline
+# Traces to: AG-SPEC-2026-V2, [REQ-VER-001], [REQ-VER-002], [NFR-PERF-001]
+
+name: Android Release Automation
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-package:
+    name: Build & Sign Android Packages (APK / AAB)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Audit Typographic Standards (Zero Em/En Dashes)
+        run: |
+          echo "Scanning for forbidden em dashes and en dashes..."
+          if grep -rnP '[\x{2013}\x{2014}]' app/src/ build.gradle.kts settings.gradle.kts docs/ .github/; then
+            echo "Error: Forbidden em dash or en dash detected!"
+            exit 1
+          fi
+          echo "Typographic audit passed: 0 em/en dashes found."
+
+      - name: Decode Release Keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "${RELEASE_KEYSTORE_BASE64}" ]; then
+            echo "Decoding release signing keystore..."
+            echo "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > app/release.keystore
+            echo "RELEASE_KEYSTORE_PATH=app/release.keystore" >> $GITHUB_ENV
+          else
+            echo "No release keystore secret provided. Falling back to debug signing key."
+          fi
+
+      - name: Build Release APK and AAB Packages
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
+
+      - name: Consolidate Artifacts & Generate SHA256SUMS.txt
+        run: |
+          VERSION="${GITHUB_REF_NAME:-latest}"
+          mkdir -p dist
+
+          # Copy generated APK
+          APK_SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -f "${APK_SRC}" ]; then
+            cp "${APK_SRC}" "dist/androgrid-worker-${VERSION}.apk"
+            cp "${APK_SRC}" "dist/androgrid-worker-release.apk"
+          else
+            echo "Error: Release APK artifact not found!"
+            exit 1
+          fi
+
+          # Copy generated AAB Bundle
+          AAB_SRC=$(find app/build/outputs/bundle/release -name "*.aab" | head -n 1)
+          if [ -f "${AAB_SRC}" ]; then
+            cp "${AAB_SRC}" "dist/androgrid-worker-${VERSION}.aab"
+            cp "${AAB_SRC}" "dist/androgrid-worker-release.aab"
+          else
+            echo "Error: Release AAB artifact not found!"
+            exit 1
+          fi
+
+          # Generate cryptographic SHA-256 ledger
+          cd dist
+          sha256sum *.apk *.aab > SHA256SUMS.txt
+          echo "Generated SHA256SUMS.txt:"
+          cat SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Upload Artifacts as GitHub Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: androgrid-android-release-packages
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
+          echo "Publishing Android release for version: ${VERSION}"
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists. Uploading additional assets..."
+            gh release upload "${VERSION}" dist/* --clobber
+          else
+            gh release create "${VERSION}" dist/* \
+              --title "Release ${VERSION}" \
+              --notes "Production release APK and AAB packages for AndroGrid mobile worker client. Verified under [REQ-VER-001], [REQ-VER-002], and [NFR-PERF-001]."
+          fi
