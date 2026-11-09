@@ -34,7 +34,7 @@ jobs:
           echo "Typographic audit passed: 0 em/en dashes found."
 
       - name: Run Unit Tests and Invariant Audits
-        run: gradle testDebugUnitTest --no-daemon --stacktrace
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
       - name: Generate Dokka KDoc API Documentation
-        run: gradle dokkaHtml --no-daemon --stacktrace
+        run: ./gradlew dokkaHtml --no-daemon --stacktrace

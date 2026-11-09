@@ -35,7 +35,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Generate Dokka KDoc API Documentation
-        run: gradle dokkaHtml --no-daemon --stacktrace
+        run: ./gradlew dokkaHtml --no-daemon --stacktrace
 
       - name: Assemble Static Documentation Site
         run: python3 tools/docs/assemble_pages.py

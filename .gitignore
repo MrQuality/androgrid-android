@@ -3,6 +3,11 @@
 build/
 .kotlin/
 
+# Gradle wrapper assets (must be tracked)
+!gradle/wrapper/gradle-wrapper.jar
+!gradlew
+!gradlew.bat
+
 # Build outputs
 site/
 

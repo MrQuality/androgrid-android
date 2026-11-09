@@ -1,0 +1,4 @@
+# Enforce strict line endings for cross-platform hermetic builds
+/gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
