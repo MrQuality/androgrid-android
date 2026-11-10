@@ -113,17 +113,51 @@ The Android worker executes tasks through isolated runtime engines based on devi
 
 ---
 
+## Zero-Friction QR Code Enrollment & Hardware Keystore Provisioning
+
+To eliminate manual PKCS#12 file transfers, the worker implements automated bootstrap enrollment via CameraX QR code scanning (`[REQ-OP-001]`, `[INV-002]`, `[NFR-SEC-001]`):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as CLI / Operator
+    participant Cam as Worker Camera (CameraX)
+    participant App as Enrollment Coordinator
+    participant KS as Android KeyStore (Hardware TEE)
+    participant Ctrl as Orchestrator Enrollment Service
+
+    Op->>Op: androgrid-cli pair (generate ANSI QR)
+    Cam->>App: Decode QR payload (cluster_endpoint, ca_fingerprint, pairing_token)
+    App->>KS: Generate NIST P-256 ECDSA key pair (hardware-backed)
+    App->>KS: Sign PKCS#10 CSR (CN=node_id) using private key
+    App->>Ctrl: Outbound TLS request with CSR + pairing_token (pinned to ca_fingerprint)
+    Ctrl->>Ctrl: Validate token (single-use), sign CSR with Root CA
+    Ctrl-->>App: Return signed client certificate + Root CA
+    App->>App: Verify Root CA SHA-256 fingerprint matches pinned QR pin
+    App->>KS: Install CA-issued certificate chain into KeyStore
+    App->>Ctrl: RegisterNode over mTLS 1.3 (transition to ACTIVE)
+```
+
+### Security Safeguards during Enrollment:
+1. **Outbound-Only Invariant (`[INV-001]`):** Enrollment is initiated strictly from the mobile device to the orchestrator. No mobile listening ports are opened.
+2. **Cryptographic Root CA Pinning (`[NFR-SEC-001]`):** The initial bootstrap TLS exchange validates the server certificate against the SHA-256 `ca_fingerprint` embedded directly in the scanned QR code, neutralizing rogue Wi-Fi Man-in-the-Middle (MITM) attacks.
+3. **Hardware Key Isolation (`[INV-002]`):** Private keys are generated and anchored within the Android KeyStore (`AndroidKeyStore` provider). Key material is non-exportable and never serialized to persistent flash storage.
+4. **Immediate Single-Use Invalidation:** The orchestrator invalidates the ephemeral pairing token immediately upon issuance, preventing token replay.
+
+---
+
 ## ISO/IEC/IEEE 29148 Traceability Matrix
 
 | Requirement Identifier | Architectural Role & Implementation Component | Verification Standard |
 | :--- | :--- | :--- |
-| `[REQ-OP-001]` | `RegisterNode` request construction with dynamic capabilities (`DeviceCapabilityProvider`) | Wire parity test & registration integration spec |
+| `[REQ-OP-001]` | `RegisterNode` request construction (`DeviceCapabilityProvider`) & QR Code enrollment (`EnrollmentCoordinator`, `QrScannerActivity`) | Wire parity test & enrollment suite |
 | `[REQ-OP-002]` | `SyncNodeState` declarative 2.0s synchronization loop (`WifiSyncClient`) | Unit & mock server tests |
 | `[REQ-OP-003]` | Disconnected unary spot task lease over cellular WAN (`CellularSpotWorker`) | Robolectric cellular worker spec |
 | `[REQ-VER-001]` | Typed foreground service type guard (`WorkerForegroundService`) | Android SDK compatibility test (API 28-34) |
 | `[REQ-VER-002]` | Dynamic OS version and ABI reporting in capabilities (`DeviceCapabilityProvider`) | Capability reporting unit test |
 | `[REQ-VER-003]` | W^X in-memory sandboxing with Chicory WASI runtime (`WasmEngine`) | WASM runtime verification test |
 | `[INV-001]` | Zero listening inbound server sockets (`InboundPortGuardTest`) | Port inspection socket scanner |
-| `[INV-002]` | Mutual TLS 1.3 with P-256 KeyStore keys (`MtlsSocketFactoryProvider`) | Handshake unit test |
+| `[INV-002]` | Mutual TLS 1.3 with P-256 KeyStore keys (`MtlsSocketFactoryProvider`, `AndroidKeyStoreEnrollmentProvider`) | Handshake unit test |
 | `[INV-003]` | Zero cellular keepalive and baseband radio sleep (`CellularSpotWorker`) | Channel teardown deadline test |
+| `[NFR-SEC-001]` | Root CA SHA-256 fingerprint pinning during bootstrap enrollment (`BootstrapEnrollmentClient`) | Security violation hermetic unit test |
 | `[NFR-POW-001]` | Channel termination within 200 ms of response receipt | Timing boundary test |

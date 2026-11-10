@@ -91,6 +91,35 @@ class SettingsActivityTest {
         controller.destroy()
     }
 
+    @Test
+    fun testSettingsActivity_containsScanQrButton() {
+        val repo = InMemoryClusterSettingsRepository()
+        val controller = Robolectric.buildActivity(SettingsActivity::class.java)
+        val activity = controller.get()
+        activity.repository = repo
+
+        controller.create().start().resume()
+
+        val scanButton = findButtonByText(activity, "Scan Enrollment QR Code")
+        assertThat(scanButton).isNotNull()
+        controller.destroy()
+    }
+
+    @Test
+    fun testSettingsActivity_handleScannedQrPayload_invalidJson_doesNotCrash() {
+        val repo = InMemoryClusterSettingsRepository()
+        val controller = Robolectric.buildActivity(SettingsActivity::class.java)
+        val activity = controller.get()
+        activity.repository = repo
+
+        controller.create().start().resume()
+
+        activity.handleScannedQrPayload("invalid-non-json-content")
+        assertThat(repo.getSettings().hasMtlsCredentials).isFalse()
+
+        controller.destroy()
+    }
+
     private fun findEditTextByHint(activity: SettingsActivity, hint: String): EditText? {
         val allViews = getAllViews(activity.window.decorView)
         return allViews.filterIsInstance<EditText>().find { it.hint == hint }

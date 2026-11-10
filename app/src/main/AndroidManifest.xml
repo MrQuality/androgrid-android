@@ -14,6 +14,11 @@
     <!-- Android 13+ Notification Runtime Permission for Foreground Service visibility -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Camera permissions for QR code enrollment scanner -->
+    <!-- Traces to: [REQ-OP-001], [NFR-SEC-001] -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <application
         android:allowBackup="false"
         android:icon="@android:drawable/sym_def_app_icon"
@@ -38,6 +43,13 @@
             android:name="com.androgrid.worker.ui.SettingsActivity"
             android:exported="false"
             android:label="Cluster Settings" />
+
+        <!-- Camera QR Code Scanner Activity -->
+        <!-- Traces to: [REQ-OP-001], [NFR-SEC-001] -->
+        <activity
+            android:name="com.androgrid.worker.ui.QrScannerActivity"
+            android:exported="false"
+            android:label="Scan Enrollment QR" />
 
         <!-- Declares Typed Foreground Service strictly outbound-only -->
         <!-- Traces to: [INV-001], [REQ-VER-001] -->
