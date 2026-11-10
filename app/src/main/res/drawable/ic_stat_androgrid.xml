@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome status bar notification icon for AndroGrid Worker service -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- Antennae -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="24"
+        android:strokeLineCap="round"
+        android:pathData="M 414,233 L 442,303 M 610,233 L 582,303" />
+    <!-- Head Dome with Eyes Cut Out -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M 361.4,401.0 A 150.1,150.1 0 0,1 661.6,401.0 Z M 444.2,340.3 m -14,0 a 14,14 0 1,0 28,0 a 14,14 0 1,0 -28,0 M 578.7,340.3 m -14,0 a 14,14 0 1,0 28,0 a 14,14 0 1,0 -28,0" />
+    <!-- Torso -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 361.0,424.8 L 661.8,424.8 L 661.8,610.0 A 33,33 0 0,1 628.8,643.0 L 394.0,643.0 A 33,33 0 0,1 361.0,610.0 Z" />
+    <!-- Left Arm -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 276.3,450.8 A 30.8,30.8 0 0,1 338.0,450.8 L 338.0,595.6 A 30.8,30.8 0 0,1 276.3,595.6 Z" />
+    <!-- Right Arm -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 684.4,450.8 A 30.8,30.8 0 0,1 746.7,450.8 L 746.7,595.6 A 30.8,30.8 0 0,1 684.4,595.6 Z" />
+    <!-- Left Leg -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 420.8,643.2 L 485.2,643.2 L 485.2,752.6 A 32.2,32.2 0 0,1 420.8,752.6 Z" />
+    <!-- Right Leg -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 537.8,642.9 L 602.2,642.9 L 602.2,752.6 A 32.2,32.2 0 0,1 537.8,752.6 Z" />
+</vector>
