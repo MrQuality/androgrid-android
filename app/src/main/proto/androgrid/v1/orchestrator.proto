@@ -39,6 +39,21 @@ service AdminService {
 
   // Cancel an active or pending task.
   rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+
+  // Upload or register a WebAssembly bytecode artifact for content-addressed distribution.
+  // Traces to: [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+  rpc UploadArtifact(UploadArtifactRequest) returns (UploadArtifactResponse);
+
+  // Generate an ephemeral device pairing token for mobile node onboarding.
+  // Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+  rpc GeneratePairingToken(GeneratePairingTokenRequest) returns (GeneratePairingTokenResponse);
+}
+
+// EnrollmentService provides bootstrap enrollment for unprovisioned worker nodes.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+service EnrollmentService {
+  // Exchange an ephemeral pairing token and PKCS#10 CSR for a signed mTLS client certificate.
+  rpc EnrollWorker(EnrollWorkerRequest) returns (EnrollWorkerResponse);
 }
 
 
@@ -241,4 +256,56 @@ message CancelTaskRequest {
 message CancelTaskResponse {
   bool cancelled = 1;
   string message = 2;
+}
+
+// Request to upload or register a WASM bytecode artifact for content-addressed distribution.
+// Traces to: [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+message UploadArtifactRequest {
+  bytes bytecode = 1;
+  string expected_sha256 = 2;
+}
+
+// Response acknowledging artifact registration.
+// Traces to: [NFR-PERF-001], [REQ-OP-003]
+message UploadArtifactResponse {
+  bool success = 1;
+  string artifact_sha256 = 2;
+  string artifact_url = 3;
+  string message = 4;
+}
+
+// Request to generate an ephemeral pairing token.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+message GeneratePairingTokenRequest {
+  string node_id = 1;
+  uint32 expires_in_seconds = 2;
+  string san = 3;
+}
+
+// Response containing ephemeral pairing token and enrollment metadata.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+message GeneratePairingTokenResponse {
+  string pairing_token = 1;
+  string cluster_endpoint = 2;
+  string ca_fingerprint = 3;
+  string node_id = 4;
+  uint64 expires_at_epoch_seconds = 5;
+  string pairing_payload_json = 6;
+}
+
+// Request to redeem pairing token and sign client CSR.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+message EnrollWorkerRequest {
+  string pairing_token = 1;
+  string node_id = 2;
+  string csr_pem = 3;
+}
+
+// Response returning signed X.509 client certificate and Root CA.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+message EnrollWorkerResponse {
+  bool success = 1;
+  string client_cert_pem = 2;
+  string ca_cert_pem = 3;
+  string error_message = 4;
 }

@@ -94,6 +94,12 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         require(clientCertPem.isNotBlank()) { "Client certificate PEM must not be empty" }
         require(clientKeyPem.isNotBlank()) { "Client private key PEM must not be empty" }
 
+        if (clientKeyPem.startsWith("keystore:")) {
+            val alias = clientKeyPem.removePrefix("keystore:")
+            return com.androgrid.worker.enrollment.AndroidKeyStoreEnrollmentProvider.createDefault()
+                .createMtlsContext(alias, caCertPem)
+        }
+
         val cf = CertificateFactory.getInstance("X.509")
 
         // 1. Build TrustStore with CA certificate(s)

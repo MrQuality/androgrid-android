@@ -82,7 +82,24 @@ class NetworkRouteMonitor(
         }
 
         override fun onLost(network: Network) {
-            _currentRoute.value = NetworkRoute.Offline
+            val active = connectivityManager.activeNetwork
+            if (active == null || active == network) {
+                _currentRoute.value = NetworkRoute.Offline
+            } else {
+                val caps = connectivityManager.getNetworkCapabilities(active)
+                if (caps != null) {
+                    val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    val isCellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    val isMetered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                    _currentRoute.value = NetworkRouteEvaluator.evaluate(
+                        isWifi = isWifi,
+                        isCellular = isCellular,
+                        isMetered = isMetered
+                    )
+                } else {
+                    _currentRoute.value = NetworkRoute.Offline
+                }
+            }
         }
     }
 

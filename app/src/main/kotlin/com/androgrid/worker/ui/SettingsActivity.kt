@@ -1,5 +1,6 @@
 package com.androgrid.worker.ui
 
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
@@ -14,11 +15,16 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
+import com.androgrid.worker.enrollment.EnrollmentCoordinator
+import com.androgrid.worker.enrollment.EnrollmentPayloadParser
+import com.androgrid.worker.enrollment.EnrollmentResult
 import com.androgrid.worker.network.ClusterSettings
 import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.MtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
+import kotlinx.coroutines.launch
 import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -46,6 +52,18 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var saveButton: Button
     private lateinit var resetButton: Button
     private lateinit var importP12Button: Button
+    private lateinit var scanQrButton: Button
+
+    private val qrScanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val payload = result.data?.getStringExtra(QrScannerActivity.EXTRA_SCANNED_PAYLOAD)
+            if (!payload.isNullOrBlank()) {
+                handleScannedQrPayload(payload)
+            }
+        }
+    }
 
     private val p12FileLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
@@ -114,6 +132,24 @@ class SettingsActivity : ComponentActivity() {
 
         // Section 3: Mutual TLS Cryptographic Material
         rootLayout.addView(createSectionHeader("Mutual TLS Cryptographic Identity"))
+
+        scanQrButton = Button(this).apply {
+            text = "Scan Enrollment QR Code"
+            setBackgroundColor(Color.parseColor("#1B5E20"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                val intent = Intent(this@SettingsActivity, QrScannerActivity::class.java)
+                qrScanLauncher.launch(intent)
+            }
+        }
+        val scanParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 0, 0, 16)
+        }
+        rootLayout.addView(scanQrButton, scanParams)
+
         importP12Button = Button(this).apply {
             text = "Import PKCS#12 (.p12) KeyStore"
             setBackgroundColor(Color.parseColor("#37474F"))
@@ -242,6 +278,31 @@ class SettingsActivity : ComponentActivity() {
             }
         } catch (e: Exception) {
             Toast.makeText(this, "Failed to read PKCS#12 bundle: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    internal fun handleScannedQrPayload(rawContent: String) {
+        lifecycleScope.launch {
+            try {
+                val payload = EnrollmentPayloadParser.parse(rawContent)
+                val coordinator = EnrollmentCoordinator(
+                    settingsRepository = repository
+                )
+                val defaultNodeId = "worker_${android.os.Build.MODEL.replace(" ", "_")}"
+                val result = coordinator.executeEnrollment(payload, defaultNodeId)
+
+                when (result) {
+                    is EnrollmentResult.Success -> {
+                        loadCurrentSettings()
+                        Toast.makeText(this@SettingsActivity, "Device enrolled successfully via QR code!", Toast.LENGTH_LONG).show()
+                    }
+                    is EnrollmentResult.Failure -> {
+                        Toast.makeText(this@SettingsActivity, "Enrollment failed: ${result.errorMessage}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this@SettingsActivity, "Invalid QR payload: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 

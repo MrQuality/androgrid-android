@@ -80,4 +80,41 @@ class MainActivityAutomationTest {
 
         controller.destroy()
     }
+
+    @Test
+    fun testMainActivity_containsScanEnrollmentButton() {
+        val controller = Robolectric.buildActivity(MainActivity::class.java)
+        val activity = controller.get()
+        activity.settingsRepository = repo
+
+        controller.create().start().resume()
+
+        val allViews = mutableListOf<android.view.View>()
+        fun collect(v: android.view.View) {
+            allViews.add(v)
+            if (v is android.view.ViewGroup) {
+                for (i in 0 until v.childCount) collect(v.getChildAt(i))
+            }
+        }
+        collect(activity.window.decorView)
+
+        val scanButton = allViews.filterIsInstance<android.widget.Button>().find { it.text == "Scan Enrollment QR Code" }
+        assertThat(scanButton).isNotNull()
+
+        controller.destroy()
+    }
+
+    @Test
+    fun testMainActivity_handleScannedQrPayload_invalidPayload_doesNotCrash() {
+        val controller = Robolectric.buildActivity(MainActivity::class.java)
+        val activity = controller.get()
+        activity.settingsRepository = repo
+
+        controller.create().start().resume()
+
+        activity.handleScannedQrPayload("corrupted-qr-payload")
+        assertThat(repo.getSettings().hasMtlsCredentials).isFalse()
+
+        controller.destroy()
+    }
 }

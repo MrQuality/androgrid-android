@@ -15,6 +15,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -24,7 +25,11 @@ import com.androgrid.worker.automation.TestAutomationReceiver
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
+import com.androgrid.worker.capability.NodeIdProvider
 import com.androgrid.worker.capability.StandardRootChecker
+import com.androgrid.worker.enrollment.EnrollmentCoordinator
+import com.androgrid.worker.enrollment.EnrollmentPayloadParser
+import com.androgrid.worker.enrollment.EnrollmentResult
 import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.NetworkRoute
 import com.androgrid.worker.network.NetworkRouteMonitor
@@ -58,7 +63,19 @@ class MainActivity : ComponentActivity() {
     private lateinit var thermalBadgeView: TextView
     private lateinit var telemetryView: TextView
     private lateinit var toggleButton: Button
+    private lateinit var scanEnrollmentButton: Button
     private lateinit var settingsButton: Button
+
+    private val qrScanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val payload = result.data?.getStringExtra(QrScannerActivity.EXTRA_SCANNED_PAYLOAD)
+            if (!payload.isNullOrBlank()) {
+                handleScannedQrPayload(payload)
+            }
+        }
+    }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -140,6 +157,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    internal fun handleScannedQrPayload(rawContent: String) {
+        lifecycleScope.launch {
+            val repo = settingsRepository ?: SharedPreferencesClusterSettingsRepository.getInstance(applicationContext)
+            try {
+                val payload = EnrollmentPayloadParser.parse(rawContent)
+                val coordinator = EnrollmentCoordinator(
+                    settingsRepository = repo
+                )
+                val nodeId = viewModel.uiState.value.nodeId
+                val result = coordinator.executeEnrollment(payload, nodeId)
+
+                when (result) {
+                    is EnrollmentResult.Success -> {
+                        Toast.makeText(this@MainActivity, "Device enrolled in cluster! Starting compute participation...", Toast.LENGTH_LONG).show()
+                        viewModel.startParticipation()
+                    }
+                    is EnrollmentResult.Failure -> {
+                        Toast.makeText(this@MainActivity, "Enrollment failed: ${result.errorMessage}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Invalid QR payload: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         networkMonitor.stopMonitoring()
@@ -169,11 +212,7 @@ class MainActivity : ComponentActivity() {
             workScheduler = workScheduler
         )
 
-        val serial = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            Build.SERIAL
-        } else {
-            "worker_${Build.MODEL.replace(" ", "_")}"
-        }
+        val serial = NodeIdProvider.getOrCreateNodeId(applicationContext)
 
         viewModel = WorkerDashboardViewModel(
             nodeId = serial,
@@ -232,6 +271,24 @@ class MainActivity : ComponentActivity() {
         rootLayout.addView(thermalBadgeView)
         rootLayout.addView(telemetryView)
 
+        scanEnrollmentButton = Button(this).apply {
+            text = "Scan Enrollment QR Code"
+            textSize = 15f
+            setBackgroundColor(Color.parseColor("#1B5E20")) // Deep green
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                val intent = Intent(this@MainActivity, QrScannerActivity::class.java)
+                qrScanLauncher.launch(intent)
+            }
+        }
+        val scanParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 36, 0, 0)
+        }
+        rootLayout.addView(scanEnrollmentButton, scanParams)
+
         toggleButton = Button(this).apply {
             text = "Start Compute Participation"
             textSize = 16f
@@ -249,7 +306,7 @@ class MainActivity : ComponentActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
-            setMargins(0, 48, 0, 0)
+            setMargins(0, 16, 0, 0)
         }
         rootLayout.addView(toggleButton, buttonParams)
 

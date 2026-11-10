@@ -50,3 +50,23 @@
 # -----------------------------------------------------------------------------
 -keepnames class kotlinx.coroutines.** { *; }
 -dontwarn kotlinx.coroutines.**
+
+# -----------------------------------------------------------------------------
+# BouncyCastle Cryptographic Service Provider & ASN.1 Parsers
+# -----------------------------------------------------------------------------
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+
+# -----------------------------------------------------------------------------
+# ZXing Barcode Scanning Core
+# -----------------------------------------------------------------------------
+-keep class com.google.zxing.** { *; }
+-dontwarn com.google.zxing.**
+
+# -----------------------------------------------------------------------------
+# CameraX & Google ML Kit Barcode Scanning
+# -----------------------------------------------------------------------------
+-keep class androidx.camera.** { *; }
+-dontwarn androidx.camera.**
+-keep class com.google.mlkit.** { *; }
+-dontwarn com.google.mlkit.**

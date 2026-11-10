@@ -42,11 +42,38 @@ adb install -r -g ./app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
-## Step 2: Generating and Provisioning mTLS 1.3 Certificates
+## Step 2: Provisioning mTLS 1.3 Keystore Identity
 
-All control plane communications require Mutual TLS 1.3 (`[INV-002]`, `[NFR-SEC-001]`). The Android client requires a private key and X.509 certificate signed by the cluster Root CA.
+All control plane communications require Mutual TLS 1.3 (`[INV-002]`, `[NFR-SEC-001]`). The Android client generates an on-device ECDSA NIST P-256 key pair anchored inside the Android KeyStore and acquires a certificate signed by the cluster Root CA.
 
-### Generating the Client Key and Certificate with OpenSSL
+### Option A (Recommended): Zero-Touch Camera QR Code Enrollment
+
+The fastest and most secure method to onboard mobile workers is single-scan QR code enrollment:
+
+1. **Generate Ephemeral Pairing QR Code on Host Workstation:**
+   ```bash
+   androgrid-cli pair --expires-in 300
+   ```
+   This displays a high-contrast ANSI UTF-8 QR code directly in the terminal, embedding the cluster endpoint, Root CA SHA-256 fingerprint, and a single-use token.
+
+2. **Scan with the Worker Application:**
+   - Launch the **AndroGrid Worker** app.
+   - Tap **Scan Enrollment QR Code** on the main dashboard or within **Settings**.
+   - Align the viewfinder over the terminal QR code.
+
+3. **Automatic Hardware Keystore Provisioning:**
+   - The device automatically generates an on-device NIST P-256 key pair in the hardware-backed `AndroidKeyStore`.
+   - The device constructs a PKCS#10 Certificate Signing Request (CSR) and signs it using the hardware private key.
+   - The bootstrap client connects to the orchestrator over TLS pinned to the Root CA fingerprint, submits the CSR and single-use pairing token, and receives the signed client certificate.
+   - The issued certificate is installed into the KeyStore. The device immediately transitions to active compute status.
+
+---
+
+### Option B (Manual / Headless): PKCS#12 Archive File Import
+
+For headless CI test runners or emulators lacking camera hardware, you can manually generate keys using OpenSSL and import a `.p12` archive:
+
+#### Generating the Client Key and Certificate with OpenSSL
 
 If you are enrolling a new device named `node_pixel_7_01`, run the following commands on your cluster management workstation:
 

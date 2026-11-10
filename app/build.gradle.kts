@@ -90,6 +90,20 @@ dependencies {
     implementation("com.google.protobuf:protobuf-javalite:3.25.1")
     implementation("com.google.protobuf:protobuf-kotlin-lite:3.25.1")
 
+    // Cryptography & PKCS#10 CSR Generation
+    // Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+
+    // CameraX & Barcode Scanning (QR Code Scanner)
+    // Traces to: [REQ-OP-001], [NFR-SEC-001]
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("com.google.zxing:core:3.5.3")
+
     // Unit & Robolectric Testing
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
@@ -97,6 +111,10 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.12.2")
     testImplementation("androidx.test:core:1.5.0")
     testImplementation("androidx.work:work-testing:2.9.0")
+    testImplementation("io.mockk:mockk:1.13.11")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("io.grpc:grpc-testing:1.64.0")
+    testImplementation("io.grpc:grpc-inprocess:1.64.0")
 }
 
 protobuf {
