@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.androgrid.worker.R
 import com.androgrid.v1.NetworkTransportType
 import com.androgrid.v1.RegisterNodeRequest
 import com.androgrid.v1.SyncNodeStateRequest
@@ -241,7 +242,7 @@ class WorkerForegroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("AndroGrid Worker")
             .setContentText("Participating in distributed cluster edge compute")
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_androgrid)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

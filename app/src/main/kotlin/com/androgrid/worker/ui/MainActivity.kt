@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -20,6 +21,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.androgrid.worker.R
 import com.androgrid.worker.automation.PkiCredentialLoader
 import com.androgrid.worker.automation.TestAutomationReceiver
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
@@ -230,6 +232,20 @@ class MainActivity : ComponentActivity() {
             setPadding(48, 64, 48, 64)
             setBackgroundColor(Color.parseColor("#121212"))
         }
+
+        val logoView = ImageView(this).apply {
+            setImageResource(R.drawable.androgrid_logo)
+            contentDescription = "AndroGrid Logo"
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        val logoParams = LinearLayout.LayoutParams(
+            (72 * resources.displayMetrics.density).toInt(),
+            (72 * resources.displayMetrics.density).toInt()
+        ).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = (16 * resources.displayMetrics.density).toInt()
+        }
+        rootLayout.addView(logoView, logoParams)
 
         val titleView = TextView(this).apply {
             text = "AndroGrid Edge Compute"
