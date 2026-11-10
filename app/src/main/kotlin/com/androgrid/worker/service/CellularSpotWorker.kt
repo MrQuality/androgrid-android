@@ -15,6 +15,7 @@ import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.BatteryStatusProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
+import com.androgrid.worker.capability.NodeIdProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.network.CellularTransportClient
@@ -159,7 +160,7 @@ class CellularSpotWorker(
         )
 
         CellularSpotWorkerLogic(
-            nodeId = "node_${android.os.Build.SERIAL.takeIf { it != "unknown" } ?: "android_worker"}",
+            nodeId = NodeIdProvider.getOrCreateNodeId(appContext),
             batteryProvider = batteryProvider,
             capabilityProvider = capabilityProvider,
             cellularClient = cellularClient,

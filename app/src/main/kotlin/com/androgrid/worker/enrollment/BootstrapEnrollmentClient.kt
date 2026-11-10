@@ -2,6 +2,7 @@ package com.androgrid.worker.enrollment
 
 import com.androgrid.v1.EnrollWorkerRequest
 import com.androgrid.v1.EnrollmentServiceGrpcKt
+import com.androgrid.worker.network.MtlsTls13SocketFactory
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
 import kotlinx.coroutines.Dispatchers
@@ -139,8 +140,8 @@ class GrpcBootstrapEnrollmentClient(
         }
     }
 
-    private fun buildPinnedChannel(host: String, port: Int, expectedFingerprintHex: String): ManagedChannel {
-        val pinningTrustManager = object : X509TrustManager {
+    internal fun createPinningTrustManager(expectedFingerprintHex: String): X509TrustManager {
+        return object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
 
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
@@ -148,27 +149,57 @@ class GrpcBootstrapEnrollmentClient(
                     throw CertificateException("Server certificate chain is empty")
                 }
 
-                // Check if any certificate in chain matches the pinned SHA-256 fingerprint
-                val matches = chain.any { cert ->
+                // Locate the pinned trust anchor in the presentation chain
+                val anchorIndex = chain.indexOfFirst { cert ->
                     val fp = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
                         .joinToString("") { "%02x".format(it) }
                     fp.equals(expectedFingerprintHex, ignoreCase = true)
                 }
 
-                if (!matches) {
-                    throw CertificateException("Server certificate SHA-256 fingerprint does not match QR pinned fingerprint")
+                if (anchorIndex < 0) {
+                    throw CertificateException("Server certificate chain does not contain trusted anchor with SHA-256 fingerprint: $expectedFingerprintHex")
+                }
+
+                // Verify chronological validity for all certificates from leaf up to anchor
+                for (i in 0..anchorIndex) {
+                    chain[i].checkValidity()
+                }
+
+                // Verify cryptographic signature path from leaf (chain[0]) to the anchor (chain[anchorIndex])
+                for (i in 0 until anchorIndex) {
+                    val subjectCert = chain[i]
+                    val issuerCert = chain[i + 1]
+                    try {
+                        subjectCert.verify(issuerCert.publicKey)
+                    } catch (e: Exception) {
+                        throw CertificateException("Invalid certificate signature chain at index $i: ${e.message}", e)
+                    }
+                }
+
+                // If anchor is self-signed (Root CA), verify its self-signature
+                val anchorCert = chain[anchorIndex]
+                if (anchorCert.issuerX500Principal == anchorCert.subjectX500Principal) {
+                    try {
+                        anchorCert.verify(anchorCert.publicKey)
+                    } catch (e: Exception) {
+                        throw CertificateException("Invalid root certificate self-signature: ${e.message}", e)
+                    }
                 }
             }
 
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
         }
+    }
+
+    private fun buildPinnedChannel(host: String, port: Int, expectedFingerprintHex: String): ManagedChannel {
+        val pinningTrustManager = createPinningTrustManager(expectedFingerprintHex)
 
         val sslContext = SSLContext.getInstance("TLSv1.3").apply {
             init(null, arrayOf<TrustManager>(pinningTrustManager), SecureRandom())
         }
 
         return OkHttpChannelBuilder.forAddress(host, port)
-            .sslSocketFactory(sslContext.socketFactory)
+            .sslSocketFactory(MtlsTls13SocketFactory(sslContext.socketFactory))
             .overrideAuthority(host)
             .build()
     }

@@ -52,10 +52,11 @@ object QrCodeDecoder {
 
         val width = imageProxy.width
         val height = imageProxy.height
+        val rowStride = plane.rowStride
 
         val source = PlanarYUVLuminanceSource(
             bytes,
-            width,
+            rowStride,
             height,
             0,
             0,

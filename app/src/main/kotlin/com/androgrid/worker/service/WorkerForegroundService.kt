@@ -19,6 +19,7 @@ import com.androgrid.v1.TaskState
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
+import com.androgrid.worker.capability.NodeIdProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
@@ -138,7 +139,7 @@ class WorkerForegroundService : Service() {
             )
             wifiClient = client
 
-            val nodeId = "node_${Build.SERIAL.takeIf { it != "unknown" } ?: "android_wifi_worker"}"
+            val nodeId = NodeIdProvider.getOrCreateNodeId(applicationContext)
             val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
             val thermalListener = AndroidDeviceThermalStatusListener(applicationContext).apply {
                 startListening()
@@ -155,22 +156,34 @@ class WorkerForegroundService : Service() {
                 thermalStatus = initialThermal
             )
 
-            // Step 1: Register node per [REQ-OP-001]
+            // Step 1: Register node per [REQ-OP-001] with exponential backoff retry loop
             val regRequest = RegisterNodeRequest.newBuilder()
                 .setNodeId(nodeId)
                 .setCapabilities(capabilities)
                 .setClientVersion("0.1.0")
                 .build()
 
-            val regResult = client.registerNode(regRequest)
-            if (regResult.isFailure) {
-                // If registration fails, wait before retry
-                thermalListener.stopListening()
-                delay(SYNC_INTERVAL_MS)
-                return@launch
+            var sessionToken = ""
+            var retryDelayMs = SYNC_INTERVAL_MS
+            val maxRetryDelayMs = 60_000L
+
+            while (isActive && sessionToken.isEmpty()) {
+                val regResult = client.registerNode(regRequest)
+                if (regResult.isSuccess) {
+                    val token = regResult.getOrNull()?.sessionToken ?: ""
+                    if (token.isNotEmpty()) {
+                        sessionToken = token
+                        break
+                    }
+                }
+                delay(retryDelayMs)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(maxRetryDelayMs)
             }
 
-            var sessionToken = regResult.getOrNull()?.sessionToken ?: ""
+            if (!isActive || sessionToken.isEmpty()) {
+                thermalListener.stopListening()
+                return@launch
+            }
 
             // Step 2: 2.0-second declarative synchronization loop per [REQ-OP-002]
             while (isActive) {

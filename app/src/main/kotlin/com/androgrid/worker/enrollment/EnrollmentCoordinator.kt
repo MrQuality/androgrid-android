@@ -64,7 +64,7 @@ class EnrollmentCoordinator(
 
                     // Step 5: Update cluster settings repository
                     val (host, port) = payload.parseEndpoint()
-                    if (port == 443 || host.contains("domain") || host.contains("cloudflare") || !host.matches(Regex("\\d+\\.\\d+\\.\\d+\\.\\d+"))) {
+                    if (port == 443) {
                         settingsRepository.updateCellularEndpoint(host, port)
                     } else {
                         settingsRepository.updateWifiEndpoint(host, port)

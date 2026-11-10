@@ -36,12 +36,20 @@ class QrCodeAnalyzer(
                 .addOnSuccessListener { barcodes ->
                     val qrCode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE }
                     val rawValue = qrCode?.rawValue
-                    if (rawValue != null && isDispatched.compareAndSet(false, true)) {
-                        onQrCodeDetected(rawValue)
+                    if (rawValue != null) {
+                        if (isDispatched.compareAndSet(false, true)) {
+                            onQrCodeDetected(rawValue)
+                        }
+                    } else {
+                        // Fallback to ZXing if ML Kit found no barcode
+                        val fallback = QrCodeDecoder.decodeImageProxy(imageProxy)
+                        if (fallback != null && isDispatched.compareAndSet(false, true)) {
+                            onQrCodeDetected(fallback)
+                        }
                     }
                 }
                 .addOnFailureListener {
-                    // Fallback to ZXing if ML Kit fails
+                    // Fallback to ZXing if ML Kit throws an exception
                     val fallback = QrCodeDecoder.decodeImageProxy(imageProxy)
                     if (fallback != null && isDispatched.compareAndSet(false, true)) {
                         onQrCodeDetected(fallback)

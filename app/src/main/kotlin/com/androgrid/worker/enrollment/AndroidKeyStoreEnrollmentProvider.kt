@@ -3,6 +3,7 @@ package com.androgrid.worker.enrollment
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import com.androgrid.worker.network.MtlsContext
+import com.androgrid.worker.network.MtlsTls13SocketFactory
 import java.io.ByteArrayInputStream
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -99,7 +100,7 @@ class AndroidKeyStoreEnrollmentProvider : KeyEnrollmentProvider {
         }
 
         return MtlsContext(
-            socketFactory = sslContext.socketFactory,
+            socketFactory = MtlsTls13SocketFactory(sslContext.socketFactory),
             trustManager = trustManager
         )
     }

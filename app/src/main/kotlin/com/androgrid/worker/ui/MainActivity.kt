@@ -25,6 +25,7 @@ import com.androgrid.worker.automation.TestAutomationReceiver
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.DeviceCapabilityProvider
+import com.androgrid.worker.capability.NodeIdProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.enrollment.EnrollmentCoordinator
 import com.androgrid.worker.enrollment.EnrollmentPayloadParser
@@ -211,11 +212,7 @@ class MainActivity : ComponentActivity() {
             workScheduler = workScheduler
         )
 
-        val serial = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            Build.SERIAL
-        } else {
-            "worker_${Build.MODEL.replace(" ", "_")}"
-        }
+        val serial = NodeIdProvider.getOrCreateNodeId(applicationContext)
 
         viewModel = WorkerDashboardViewModel(
             nodeId = serial,
