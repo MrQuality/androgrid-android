@@ -146,7 +146,20 @@ sequenceDiagram
 
 ---
 
+## Architecture Decision Records (ADRs)
+
+For detailed design decisions and architectural trade-offs, consult the dedicated client ADRs:
+* [ADR-001: Zero Inbound Listening Ports and Outbound-Only Mobile Networking](adr/ADR-001-zero-inbound-ports.md)
+* [ADR-002: Cellular Radio Power Optimization and Fast Socket Teardown](adr/ADR-002-cellular-radio-power-optimization.md)
+* [ADR-003: Typed Foreground Service (API 34+) and WorkManager Hybrid Background Lifecycle](adr/ADR-003-typed-foreground-service-and-workmanager.md)
+* [ADR-004: In-Memory WebAssembly/WASI Execution without Dynamic Shared Library Disk Emission](adr/ADR-004-in-memory-wasm-wasi-execution.md)
+* [ADR-005: Rooted Device Demarcation and Toybox User Sandbox Separation](adr/ADR-005-rooted-device-demarcation.md)
+
+---
+
 ## ISO/IEC/IEEE 29148 Traceability Matrix
+
+For the complete bidirectional specification traceability matrix, refer to [traceability_matrix.md](traceability_matrix.md).
 
 | Requirement Identifier | Architectural Role & Implementation Component | Verification Standard |
 | :--- | :--- | :--- |
