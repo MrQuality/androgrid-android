@@ -39,23 +39,38 @@ jobs:
           fi
           echo "Typographic audit passed: 0 em/en dashes found."
 
-      - name: Decode Release Keystore
+      - name: Setup Signing Keystore
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          SECRET_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          SECRET_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          SECRET_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           if [ -n "${RELEASE_KEYSTORE_BASE64}" ]; then
             echo "Decoding release signing keystore..."
             echo "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > app/release.keystore
             echo "RELEASE_KEYSTORE_PATH=app/release.keystore" >> $GITHUB_ENV
+            echo "RELEASE_KEYSTORE_PASSWORD=${SECRET_KEYSTORE_PASSWORD}" >> $GITHUB_ENV
+            echo "RELEASE_KEY_ALIAS=${SECRET_KEY_ALIAS}" >> $GITHUB_ENV
+            echo "RELEASE_KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> $GITHUB_ENV
           else
-            echo "No release keystore secret provided. Falling back to debug signing key."
+            echo "No release keystore secret provided. Generating hermetic CI signing keystore..."
+            keytool -genkeypair -v \
+              -keystore app/release.keystore \
+              -alias androgrid-ci \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass androgrid \
+              -keypass androgrid \
+              -dname "CN=AndroGrid CI, O=AndroGrid, C=US"
+            echo "RELEASE_KEYSTORE_PATH=app/release.keystore" >> $GITHUB_ENV
+            echo "RELEASE_KEYSTORE_PASSWORD=androgrid" >> $GITHUB_ENV
+            echo "RELEASE_KEY_ALIAS=androgrid-ci" >> $GITHUB_ENV
+            echo "RELEASE_KEY_PASSWORD=androgrid" >> $GITHUB_ENV
           fi
 
       - name: Build Release APK and AAB Packages
-        env:
-          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
 
