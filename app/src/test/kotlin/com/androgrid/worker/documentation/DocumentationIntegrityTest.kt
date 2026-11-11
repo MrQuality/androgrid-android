@@ -126,4 +126,66 @@ class DocumentationIntegrityTest {
         assertThat(content).contains("deploy-pages")
         assertThat(content).contains("assemble_pages.py")
     }
+
+    @Test
+    fun testClientArchitectureDecisionRecordsCompleteness() {
+        val docsDir = getProjectDocsDir()
+        val adrDir = File(docsDir, "adr")
+        assertThat(adrDir.exists()).isTrue()
+        assertThat(adrDir.isDirectory).isTrue()
+
+        val expectedAdrs = listOf(
+            "ADR-001-zero-inbound-ports.md",
+            "ADR-002-cellular-radio-power-optimization.md",
+            "ADR-003-typed-foreground-service-and-workmanager.md",
+            "ADR-004-in-memory-wasm-wasi-execution.md",
+            "ADR-005-rooted-device-demarcation.md"
+        )
+
+        for (adrFileName in expectedAdrs) {
+            val adrFile = File(adrDir, adrFileName)
+            assertWithMessage("Missing required client ADR: $adrFileName").that(adrFile.exists()).isTrue()
+
+            val content = adrFile.readText(Charsets.UTF_8)
+            assertThat(content).contains("## Status")
+            assertThat(content).contains("Accepted")
+            assertThat(content).contains("## Context")
+            assertThat(content).contains("## Decision")
+            assertThat(content).contains("## Consequences")
+            assertThat(content).contains("ISO/IEC/IEEE 29148")
+        }
+    }
+
+    @Test
+    fun testIso29148ClientTraceabilityMatrixCompleteness() {
+        val docsDir = getProjectDocsDir()
+        val matrixFile = File(docsDir, "traceability_matrix.md")
+        assertThat(matrixFile.exists()).isTrue()
+
+        val content = matrixFile.readText(Charsets.UTF_8)
+        assertThat(content).contains("ISO/IEC/IEEE 29148")
+
+        val requiredRequirementTags = listOf(
+            "[REQ-OP-001]",
+            "[REQ-OP-002]",
+            "[REQ-OP-003]",
+            "[REQ-OP-004]",
+            "[INV-001]",
+            "[INV-002]",
+            "[INV-003]",
+            "[INV-006]",
+            "[ANTI-001]",
+            "[ANTI-003]",
+            "[NFR-SEC-001]",
+            "[NFR-POW-001]",
+            "[NFR-PERF-001]",
+            "[REQ-VER-001]",
+            "[REQ-VER-002]",
+            "[REQ-VER-003]"
+        )
+
+        for (tag in requiredRequirementTags) {
+            assertWithMessage("Traceability matrix must cite requirement $tag").that(content).contains(tag)
+        }
+    }
 }
