@@ -28,8 +28,16 @@ android {
             val keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS") as? String
             val keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD") as? String
 
-            if (!keystorePath.isNullOrBlank() && File(keystorePath).exists()) {
-                storeFile = File(keystorePath)
+            val resolvedFile = keystorePath?.let { path ->
+                val f = File(path)
+                if (f.isAbsolute && f.exists()) f
+                else if (rootProject.file(path).exists()) rootProject.file(path)
+                else if (file(path).exists()) file(path)
+                else null
+            }
+
+            if (resolvedFile != null) {
+                storeFile = resolvedFile.absoluteFile
                 storePassword = keystorePassword
                 this.keyAlias = keyAlias
                 this.keyPassword = keyPassword
