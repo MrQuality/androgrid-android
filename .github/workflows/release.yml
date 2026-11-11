@@ -49,7 +49,7 @@ jobs:
           if [ -n "${RELEASE_KEYSTORE_BASE64}" ]; then
             echo "Decoding release signing keystore..."
             echo "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > app/release.keystore
-            echo "RELEASE_KEYSTORE_PATH=app/release.keystore" >> $GITHUB_ENV
+            echo "RELEASE_KEYSTORE_PATH=${GITHUB_WORKSPACE}/app/release.keystore" >> $GITHUB_ENV
             echo "RELEASE_KEYSTORE_PASSWORD=${SECRET_KEYSTORE_PASSWORD}" >> $GITHUB_ENV
             echo "RELEASE_KEY_ALIAS=${SECRET_KEY_ALIAS}" >> $GITHUB_ENV
             echo "RELEASE_KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> $GITHUB_ENV
@@ -64,7 +64,7 @@ jobs:
               -storepass androgrid \
               -keypass androgrid \
               -dname "CN=AndroGrid CI, O=AndroGrid, C=US"
-            echo "RELEASE_KEYSTORE_PATH=app/release.keystore" >> $GITHUB_ENV
+            echo "RELEASE_KEYSTORE_PATH=${GITHUB_WORKSPACE}/app/release.keystore" >> $GITHUB_ENV
             echo "RELEASE_KEYSTORE_PASSWORD=androgrid" >> $GITHUB_ENV
             echo "RELEASE_KEY_ALIAS=androgrid-ci" >> $GITHUB_ENV
             echo "RELEASE_KEY_PASSWORD=androgrid" >> $GITHUB_ENV
