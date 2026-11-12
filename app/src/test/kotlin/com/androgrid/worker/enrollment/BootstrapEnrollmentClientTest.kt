@@ -242,7 +242,8 @@ class BootstrapEnrollmentClientTest {
         // Generate a forged server cert signed by clientCert (which has basicConstraints == -1)
         val kpg = KeyPairGenerator.getInstance("EC").apply { initialize(256) }
         val serverKeyPair = kpg.generateKeyPair()
-        val signer = JcaContentSignerBuilder("SHA256withECDSA").build(clientPrivateKey)
+        val sigAlg = if (clientPrivateKey.algorithm == "EC") "SHA256withECDSA" else "SHA256withRSA"
+        val signer = JcaContentSignerBuilder(sigAlg).build(clientPrivateKey)
         val now = System.currentTimeMillis()
         val certBuilder = JcaX509v3CertificateBuilder(
             X500Name(clientCert.subjectX500Principal.name),

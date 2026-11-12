@@ -171,21 +171,23 @@ class GrpcBootstrapEnrollmentClient(
                     val subjectCert = chain[i]
                     val issuerCert = chain[i + 1]
 
-                    // RFC 5280 Section 4.2.1.9: Intermediate signers must be authorized CAs
-                    if (issuerCert.basicConstraints < 0) {
-                        throw CertificateException(
-                            "Certificate at index ${i + 1} (${issuerCert.subjectX500Principal.name}) " +
-                                "is not authorized as a CA (basicConstraints < 0)"
-                        )
-                    }
+                    // RFC 5280 Section 4.2.1.9: Intermediate signers between leaf and anchor must be authorized CAs
+                    if (i + 1 < anchorIndex) {
+                        if (issuerCert.basicConstraints < 0) {
+                            throw CertificateException(
+                                "Certificate at index ${i + 1} (${issuerCert.subjectX500Principal.name}) " +
+                                    "is not authorized as a CA (basicConstraints < 0)"
+                            )
+                        }
 
-                    // RFC 5280 Section 4.2.1.3: Intermediate signers must have keyCertSign asserted
-                    val keyUsage = issuerCert.keyUsage
-                    if (keyUsage != null && (keyUsage.size <= 5 || !keyUsage[5])) {
-                        throw CertificateException(
-                            "Certificate at index ${i + 1} (${issuerCert.subjectX500Principal.name}) " +
-                                "lacks keyCertSign key usage"
-                        )
+                        // RFC 5280 Section 4.2.1.3: Intermediate signers must have keyCertSign asserted
+                        val keyUsage = issuerCert.keyUsage
+                        if (keyUsage != null && (keyUsage.size <= 5 || !keyUsage[5])) {
+                            throw CertificateException(
+                                "Certificate at index ${i + 1} (${issuerCert.subjectX500Principal.name}) " +
+                                    "lacks keyCertSign key usage"
+                            )
+                        }
                     }
 
                     try {

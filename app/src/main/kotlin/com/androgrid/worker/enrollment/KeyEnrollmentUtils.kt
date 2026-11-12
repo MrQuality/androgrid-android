@@ -71,6 +71,41 @@ object KeyEnrollmentUtils {
     }
 
     /**
+     * Parses a PEM-encoded PKCS#8 EC or RSA private key into a [PrivateKey] instance.
+     *
+     * @param keyPem PEM-encoded private key string.
+     * @return Parsed [PrivateKey] instance.
+     */
+    fun parsePrivateKey(keyPem: String): PrivateKey {
+        require(keyPem.isNotBlank()) { "Private key PEM must not be empty" }
+        val cleanKey = keyPem
+            .replace("-----BEGIN PRIVATE KEY-----", "")
+            .replace("-----END PRIVATE KEY-----", "")
+            .replace("-----BEGIN EC PRIVATE KEY-----", "")
+            .replace("-----END EC PRIVATE KEY-----", "")
+            .replace("-----BEGIN RSA PRIVATE KEY-----", "")
+            .replace("-----END RSA PRIVATE KEY-----", "")
+            .replace("\\s".toRegex(), "")
+
+        val keyBytes = try {
+            java.util.Base64.getDecoder().decode(cleanKey)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("Client private key PEM contains invalid base64 data", e)
+        }
+
+        val keySpec = java.security.spec.PKCS8EncodedKeySpec(keyBytes)
+        return try {
+            java.security.KeyFactory.getInstance("EC").generatePrivate(keySpec)
+        } catch (_: Exception) {
+            try {
+                java.security.KeyFactory.getInstance("RSA").generatePrivate(keySpec)
+            } catch (e2: Exception) {
+                throw IllegalArgumentException("Client private key is neither valid EC nor RSA PKCS#8 key", e2)
+            }
+        }
+    }
+
+    /**
      * Constructs a PKCS#10 Certificate Signing Request (CSR) with Subject Common Name set to commonName,
      * signed by the provided private key using SHA256withECDSA.
      *
