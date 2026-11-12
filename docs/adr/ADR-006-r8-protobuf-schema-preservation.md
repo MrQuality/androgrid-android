@@ -5,7 +5,7 @@ Accepted
 
 ## Architectural Scope & Requirements
 - **Goal Reference:** G-15
-- **Traceability:** `[REQ-VER-001]`, `[REQ-OP-001]`, `[NFR-PERF-001]`
+- **Traceability:** `[REQ-VER-002]`, `[REQ-OP-001]`
 - **Standard:** ISO/IEC/IEEE 29148
 - **GitHub Issue:** #37
 
@@ -33,28 +33,27 @@ Because `com.androgrid.v1.**` was not protected:
 ---
 
 ## Decision
-We enforce a **Type-Hierarchical Protobuf Lite Preservation Contract** in `app/proguard-rules.pro` alongside explicit contract package preservation:
+We enforce a **Type-Hierarchical Protobuf Lite Member Preservation Contract** in `app/proguard-rules.pro` alongside explicit client gRPC service preservation:
 
-1. **Type-Hierarchical Invariant:** Rather than relying exclusively on brittle package path string matches, the rule explicitly matches all classes inheriting from `com.google.protobuf.GeneratedMessageLite` and preserves all fields and public methods:
+1. **Type-Hierarchical Member Invariant:** Rather than blanket-keeping all classes (which prevents dead-code tree-shaking), the rule uses `-keepclassmembers` to match all classes inheriting from `com.google.protobuf.GeneratedMessageLite` and preserves their fields for schema reflection:
    ```proguard
-   -keep class * extends com.google.protobuf.GeneratedMessageLite {
+   -keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
        <fields>;
-       public *;
    }
    -keep class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
    ```
-2. **Explicit Namespace Preservation:** Explicitly preserve `com.androgrid.v1.**` to protect service stubs, builders, and generated constants:
+2. **Explicit Client Service Preservation:** Explicitly preserve client gRPC service stubs utilized by the mobile worker (`AndroGridServiceGrpc*`, `EnrollmentServiceGrpc*`), without adding blanket package keep rules or suppressing first-party compiler warnings:
    ```proguard
-   -keep class com.androgrid.v1.** { *; }
-   -dontwarn com.androgrid.v1.**
+   -keep class com.androgrid.v1.AndroGridServiceGrpc* { *; }
+   -keep class com.androgrid.v1.EnrollmentServiceGrpc* { *; }
    ```
-3. **Elimination of Phantom Namespaces:** Completely remove `-keep class com.androgrid.contract.**`.
-4. **Automated Release Integrity Verification:** Unit test `ReleaseAutomationIntegrityTest` is updated to assert the presence of structural `GeneratedMessageLite` preservation rules and verify zero references to obsolete packages.
+3. **Elimination of Phantom Namespaces & Warning Suppression:** Completely remove `-keep class com.androgrid.contract.**` and avoid `-dontwarn` on first-party `com.androgrid.v1.**` code.
+4. **Automated Release Integrity Verification:** Unit test `ReleaseAutomationIntegrityTest` is updated to assert structural `GeneratedMessageLite` preservation rules on active (non-commented) lines, and `.github/workflows/ci.yml` is updated to execute `minifyReleaseWithR8` on every pull request.
 
 ### Architectural Rationale
-* **Resilience to Package Refactoring:** Type-hierarchical rules ensure that any new `.proto` files added to the cluster contract remain protected regardless of what Java package option is declared.
+* **Resilience to Package Refactoring:** Type-hierarchical rules ensure that any new message schemas added to the contract remain protected regardless of what Java package option is declared.
 * **Guaranteed Reflection Integrity:** Protobuf Lite reflection algorithms require field name parity between the compiled schema descriptor and the bytecode class definition.
-* **Hermetic Binary Optimization:** Dead code elimination is preserved for unreferenced messages, upholding `[NFR-PERF-001]`.
+* **Hermetic Binary Optimization:** Dead code elimination is preserved for unreferenced messages (such as operator-only `AdminService` RPCs) by using `-keepclassmembers`, avoiding forced retention of unused bytecode while upholding `[REQ-VER-002]`.
 
 ---
 
