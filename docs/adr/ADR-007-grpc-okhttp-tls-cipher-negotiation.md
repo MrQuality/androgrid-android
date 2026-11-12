@@ -1,4 +1,4 @@
-# ADR-007: gRPC-OkHttp TLS 1.2 and 1.3 Cipher Suite Negotiation for Mobile mTLS Transport
+# ADR-007: Strict TLS 1.3 Channel Configuration and RFC 5280 Trust Pinning Validation
 
 ## Status
 Accepted
@@ -15,7 +15,7 @@ Accepted
 ## Context
 Under architectural invariant `[INV-002]`, the AndroGrid mobile worker client must communicate with the control plane orchestrator exclusively over mutual TLS (mTLS) with hardware-backed ECDSA P-256 key pairs.
 
-In `androgrid-worker` `v0.0.1-alpha.2`, `MtlsSocketFactoryProvider.kt` configured an internal wrapper `MtlsTls13SocketFactory` that explicitly restricted the active SSLSocket protocols:
+In `androgrid-worker` `v0.0.1-alpha.2`, `MtlsSocketFactoryProvider.kt` configured an internal wrapper `MtlsTls13SocketFactory` that restricted active SSLSocket protocols:
 ```kotlin
 val protocols = socket.supportedProtocols.filter { it == "TLSv1.3" }
 if (protocols.isNotEmpty()) {
@@ -23,50 +23,73 @@ if (protocols.isNotEmpty()) {
 }
 ```
 
-During physical device testing on Android 15 (API 35/37, Google Pixel 8), attempting to connect either via bootstrap enrollment or via `WorkerForegroundService` (`SyncNodeState`) failed immediately. The orchestrator logged:
+During physical device testing on Android 15 (API 35/37, Google Pixel 8), connecting either via bootstrap enrollment or via `WorkerForegroundService` failed with:
 ```text
 DEBUG tonic::transport::server::incoming: accept loop error error=tls handshake eof
 ```
 
+An initial hotfix attempted to resolve this by permitting `TLSv1.2` in `MtlsTls13SocketFactory`. However, a comprehensive code review by external advisors revealed that this violated `[INV-002]` and failed to address the true root cause inside `grpc-okhttp`.
+
 ### Empirical Root Cause Analysis
-1. Android uses Conscrypt as its default TLS provider.
-2. The gRPC transport library for Android is `grpc-okhttp` (version 1.62+).
-3. OkHttp enforces an internal `ConnectionSpec.MODERN_TLS` configuration for HTTP/2 cleartext and TLS handshakes.
-4. OkHttp's `ConnectionSpec.MODERN_TLS` specifies an explicit whitelist of HTTP/2-approved cipher suites. In the bundled version of OkHttp within `grpc-okhttp`, this whitelist primarily enumerates TLS 1.2 cipher suites (such as `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` and `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`).
-5. When `MtlsTls13SocketFactory` restricted enabled protocols exclusively to `TLSv1.3`, OkHttp's cipher suite filter intersected the socket's enabled cipher suites with its whitelist.
-6. The resulting intersection was empty, causing Conscrypt to abort the TLS handshake before emitting a valid ClientHello.
+1. In `io.grpc:grpc-okhttp:1.64.0`, `OkHttpChannelBuilder` initializes its default `connectionSpec` to `INTERNAL_DEFAULT_CONNECTION_SPEC`.
+2. Disassembly of `OkHttpChannelBuilder` reveals that `INTERNAL_DEFAULT_CONNECTION_SPEC` hardcodes `tlsVersions = [TlsVersion.TLS_1_2]`.
+3. During connection establishment, `OkHttpTlsUpgrader.upgrade()` calls `connectionSpec.apply(sslSocket, false)` **after** `sslSocketFactory.createSocket()` returns.
+4. `ConnectionSpec.apply()` invokes `sslSocket.setEnabledProtocols(...)` and `sslSocket.setEnabledCipherSuites(...)`, **completely clobbering** whatever settings `MtlsTls13SocketFactory.configureSocket()` applied during socket creation.
+5. When `MtlsTls13SocketFactory` only enabled `TLSv1.3`, `ConnectionSpec.apply()` intersected `{TLSv1.3}` with `{TLSv1.2}`, yielding an empty set and causing Conscrypt to abort the TLS handshake.
+6. Furthermore, `createPinningTrustManager` checked signature chains but omitted RFC 5280 `basicConstraints >= 0` checks on intermediate certificates, creating a potential leaf-as-CA forgeability risk.
+7. `WifiSyncClient` and `CellularTransportClient` silently fell back to Android's system trust store with unauthenticated channels if mTLS credentials were null.
 
 ---
 
 ## Decision
-We modify `MtlsTls13SocketFactory.configureSocket()` to enable both `TLSv1.3` and `TLSv1.2` protocols:
+We enforce strict TLS 1.3 channel configuration and robust certificate path verification across all mobile client network layers:
 
-```kotlin
-val supported = socket.supportedProtocols.toSet()
-val targetProtocols = listOf("TLSv1.3", "TLSv1.2").filter { supported.contains(it) }
-if (targetProtocols.isNotEmpty()) {
-    socket.enabledProtocols = targetProtocols.toTypedArray()
-}
-```
+1. **Direct `OkHttpChannelBuilder.tlsConnectionSpec` Configuration:**
+   Across `WifiSyncClient`, `CellularTransportClient`, and `BootstrapEnrollmentClient`, we configure the channel builder directly with:
+   ```kotlin
+   builder
+       .useTransportSecurity()
+       .sslSocketFactory(socketFactory)
+       .tlsConnectionSpec(
+           MtlsContext.TLS_13_VERSIONS, // ["TLSv1.3"]
+           MtlsContext.TLS_13_CIPHERS   // ["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"]
+       )
+   ```
+   This overrides `OkHttpChannelBuilder`'s default `connectionSpec`, ensuring that `OkHttpTlsUpgrader` enforces pure TLS 1.3.
 
-### Architectural Rationale
-1. **Cryptographic Invariant Preservation (`[INV-002]`):** Both TLS 1.3 and TLS 1.2 (with ECDHE and AEAD) provide forward secrecy, authenticated encryption with associated data (AEAD), and mutual authentication with ECDSA P-256 client certificates.
-2. **Library Interoperability:** Enabling `TLSv1.2` alongside `TLSv1.3` allows OkHttp's `ConnectionSpec` cipher negotiation to find a valid mutual cipher suite (`TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`) while still permitting TLS 1.3 negotiation when supported by both endpoints.
-3. **No Compromise on Security:** Legacy, insecure protocols (`SSLv3`, `TLSv1.0`, `TLSv1.1`) and weak ciphers (CBC mode, RC4, 3DES) remain strictly disabled.
+2. **Strict Socket Factory Guard:**
+   `MtlsTls13SocketFactory.configureSocket()` strictly enforces `"TLSv1.3"`. Any fallback to `TLSv1.2` is removed, maintaining uncompromising compliance with `[INV-002]`.
+
+3. **Fail-Fast Credential Guard (Zero Silent Fallback):**
+   `WifiSyncClient` and `CellularTransportClient` require a non-null `SSLSocketFactory` when constructing real gRPC channels. If credentials are missing, channel construction immediately throws `IllegalStateException`, completely eliminating unauthenticated connections to public CAs.
+
+4. **RFC 5280 Intermediate CA Validation in Pinning Trust Manager:**
+   `createPinningTrustManager` asserts that all intermediate signing certificates between the leaf and the pinned Root CA anchor have `basicConstraints >= 0` (authorized CA) and KeyUsage `keyCertSign` asserted, preventing rogue leaf certificates from being accepted as intermediate CAs.
+
+5. **Hardware KeyStore Alias Isolation:**
+   `AndroidKeyStoreEnrollmentProvider` wraps `X509ExtendedKeyManager` to strictly select the target `alias`, preventing multi-alias key confusion.
+
+6. **Reactive Service Lifecycle:**
+   `WorkerForegroundService` observes `ClusterSettingsRepository.settingsFlow` using `collectLatest`, automatically adapting to newly enrolled credentials without requiring a service restart.
 
 ---
 
 ## Consequences
 
 ### Positive
-- **Stable mTLS Transport:** Both bootstrap enrollment and runtime telemetry synchronization establish persistent HTTP/2 connections over mTLS without handshake termination.
-- **Backward and Forward Compatibility:** Seamlessly operates across diverse Android API levels (API 28 through API 37+) and Tonic / Rustls control plane versions.
+- **Strict Invariant Compliance (`[INV-002]`):** Mobile network channels strictly negotiate TLS 1.3 with AEAD cipher suites without protocol downgrade.
+- **Robust Path Validation:** Custom pinning trust manager enforces RFC 5280 Section 4.2.1.9 CA authorization rules on intermediate certificates.
+- **Zero Unauthenticated Fallback:** No operational channel can ever silently connect via Android's default public Web PKI CA store.
+- **Reactive UX:** Mobile worker immediately begins sync loop upon QR pairing or credential updates.
 
 ### Negative / Trade-offs
-- The client does not exclusively mandate TLS 1.3 at the transport socket layer, allowing fallback to TLS 1.2 when the gRPC OkHttp layer dictates it.
+- Devices or proxies that do not support TLS 1.3 cannot connect to the cluster. (This is an intended architectural invariant per `[INV-002]`).
 
 ---
 
 ## Verification & Traceability
-- **Unit & Robolectric Testing:** Validated via `MtlsSocketFactoryProviderTest` asserting both `TLSv1.3` and `TLSv1.2` are preserved in enabled protocols.
-- **Physical Hardware Verification:** Validated on Google Pixel 8 (Android 15 / API 37) with successful registration (`node_Pixel_8_2c424c62`), active telemetry heartbeats, and successful Wasmtime sandbox task execution.
+- **Unit & Robolectric Tests:**
+  - `MtlsSocketFactoryProviderTest`: Asserts `socket.enabledProtocols` contains strictly `"TLSv1.3"` and excludes `"TLSv1.2"`.
+  - `BootstrapEnrollmentClientTest`: Verifies acceptance of valid pinned Root CA chains and asserts rejection of leaf certificates presented as intermediate CAs.
+  - `WifiSyncClientTest`: Asserts fail-fast rejection when building real channels without `SSLSocketFactory`.
+- **Physical Hardware Verification:** Physical Pixel 8 hardware verified successfully under mTLS 1.3.
