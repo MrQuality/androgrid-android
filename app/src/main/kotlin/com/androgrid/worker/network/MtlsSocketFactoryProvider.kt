@@ -278,8 +278,15 @@ class MtlsTls13SocketFactory(
     private fun configureSocket(socket: Socket): Socket {
         if (socket is SSLSocket) {
             val supported = socket.supportedProtocols.toList()
+            val protocols = mutableListOf<String>()
             if (supported.contains("TLSv1.3")) {
-                socket.enabledProtocols = arrayOf("TLSv1.3")
+                protocols.add("TLSv1.3")
+            }
+            if (supported.contains("TLSv1.2")) {
+                protocols.add("TLSv1.2")
+            }
+            if (protocols.isNotEmpty()) {
+                socket.enabledProtocols = protocols.toTypedArray()
             }
         }
         return socket
