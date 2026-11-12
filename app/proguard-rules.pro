@@ -13,7 +13,7 @@
 -keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
     <fields>;
 }
--keep class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
 
 # Preserve gRPC client service stubs utilized by mobile worker client
 -keep class com.androgrid.v1.AndroGridServiceGrpc* { *; }

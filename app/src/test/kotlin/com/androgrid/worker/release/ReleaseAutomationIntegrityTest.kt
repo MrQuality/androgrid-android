@@ -88,7 +88,7 @@ class ReleaseAutomationIntegrityTest {
      * reflection-free Protobuf Lite models, gRPC OkHttp transport, Chicory WASM runtime,
      * and Jetpack WorkManager worker classes.
      *
-     * Traces to: [REQ-VER-002], [NFR-PERF-001]
+     * Traces to: [REQ-VER-002], [REQ-OP-001]
      */
     @Test
     fun testProguardRulesPreserveCriticalDependencies() {
@@ -120,7 +120,8 @@ class ReleaseAutomationIntegrityTest {
         // Verify type-hierarchical field preservation on instantiated GeneratedMessageLite subclasses
         assertThat(activeDirectives).contains("-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite")
         assertThat(activeDirectives).contains("<fields>;")
-        assertThat(activeDirectives).contains("* extends com.google.protobuf.GeneratedMessageLite\$Builder")
+        assertThat(activeDirectives).contains("-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite\$Builder")
+        assertThat(activeDirectives).doesNotContain("-keep class * extends com.google.protobuf.GeneratedMessageLite\$Builder")
 
         // Verify mobile worker client gRPC service stubs are preserved
         assertThat(activeDirectives).contains("com.androgrid.v1.AndroGridServiceGrpc")

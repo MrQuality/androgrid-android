@@ -40,7 +40,7 @@ We enforce a **Type-Hierarchical Protobuf Lite Member Preservation Contract** in
    -keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
        <fields>;
    }
-   -keep class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
+   -keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
    ```
 2. **Explicit Client Service Preservation:** Explicitly preserve client gRPC service stubs utilized by the mobile worker (`AndroGridServiceGrpc*`, `EnrollmentServiceGrpc*`), without adding blanket package keep rules or suppressing first-party compiler warnings:
    ```proguard
