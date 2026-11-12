@@ -4,20 +4,20 @@
 # -----------------------------------------------------------------------------
 # Protobuf Lite & Generated Data Contracts
 # -----------------------------------------------------------------------------
-# Preserve reflection-free Protobuf Lite message models and builders
+# Preserve Protobuf Lite runtime internals
 -keep class com.google.protobuf.** { *; }
 -dontwarn com.google.protobuf.**
 
-# Preserve all generated Protobuf Lite message models, builders, and schema fields
--keep class * extends com.google.protobuf.GeneratedMessageLite {
+# Preserve schema fields for runtime reflection on instantiated Protobuf Lite messages,
+# while allowing R8 to dead-code strip unreferenced operator messages (e.g. AdminService).
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
     <fields>;
-    public *;
 }
 -keep class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
 
-# Preserve generated AndroGrid protocol buffer classes
--keep class com.androgrid.v1.** { *; }
--dontwarn com.androgrid.v1.**
+# Preserve gRPC client service stubs utilized by mobile worker client
+-keep class com.androgrid.v1.AndroGridServiceGrpc* { *; }
+-keep class com.androgrid.v1.EnrollmentServiceGrpc* { *; }
 
 # -----------------------------------------------------------------------------
 # gRPC Java & OkHttp Transport Layer
