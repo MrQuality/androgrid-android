@@ -79,12 +79,17 @@ class CellularTransportClient(
      * Traces to: [INV-002], [NFR-SEC-001], [NFR-PERF-001]
      */
     fun createChannel(): ManagedChannel {
+        val socketFactory = checkNotNull(sslSocketFactory) {
+            "Mutual TLS SSLSocketFactory must be configured for CellularTransportClient per [INV-002]"
+        }
         val builder = OkHttpChannelBuilder.forAddress(ingressHost, ingressPort)
             .useTransportSecurity()
+            .sslSocketFactory(socketFactory)
+            .tlsConnectionSpec(
+                MtlsContext.TLS_13_VERSIONS,
+                MtlsContext.TLS_13_CIPHERS
+            )
             .maxInboundMessageSize(ContractConstants.MAX_FRAME_SIZE_BYTES.toInt())
-        if (sslSocketFactory != null) {
-            builder.sslSocketFactory(sslSocketFactory)
-        }
         return builder.build()
     }
 

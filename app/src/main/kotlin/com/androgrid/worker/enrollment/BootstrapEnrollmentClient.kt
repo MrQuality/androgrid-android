@@ -2,6 +2,7 @@ package com.androgrid.worker.enrollment
 
 import com.androgrid.v1.EnrollWorkerRequest
 import com.androgrid.v1.EnrollmentServiceGrpcKt
+import com.androgrid.worker.network.MtlsContext
 import com.androgrid.worker.network.MtlsTls13SocketFactory
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
@@ -199,7 +200,12 @@ class GrpcBootstrapEnrollmentClient(
         }
 
         return OkHttpChannelBuilder.forAddress(host, port)
+            .useTransportSecurity()
             .sslSocketFactory(MtlsTls13SocketFactory(sslContext.socketFactory))
+            .tlsConnectionSpec(
+                MtlsContext.TLS_13_VERSIONS,
+                MtlsContext.TLS_13_CIPHERS
+            )
             .overrideAuthority(host)
             .build()
     }

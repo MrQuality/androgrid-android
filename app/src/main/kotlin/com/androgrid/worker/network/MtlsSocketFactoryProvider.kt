@@ -26,7 +26,16 @@ import javax.net.ssl.X509TrustManager
 data class MtlsContext(
     val socketFactory: SSLSocketFactory,
     val trustManager: X509TrustManager
-)
+) {
+    companion object {
+        val TLS_13_VERSIONS = arrayOf("TLSv1.3")
+        val TLS_13_CIPHERS = arrayOf(
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_CHACHA20_POLY1305_SHA256"
+        )
+    }
+}
 
 /**
  * Parsed certificate metadata for operator dashboard inspection and validation.
@@ -278,15 +287,8 @@ class MtlsTls13SocketFactory(
     private fun configureSocket(socket: Socket): Socket {
         if (socket is SSLSocket) {
             val supported = socket.supportedProtocols.toList()
-            val protocols = mutableListOf<String>()
             if (supported.contains("TLSv1.3")) {
-                protocols.add("TLSv1.3")
-            }
-            if (supported.contains("TLSv1.2")) {
-                protocols.add("TLSv1.2")
-            }
-            if (protocols.isNotEmpty()) {
-                socket.enabledProtocols = protocols.toTypedArray()
+                socket.enabledProtocols = arrayOf("TLSv1.3")
             }
         }
         return socket
