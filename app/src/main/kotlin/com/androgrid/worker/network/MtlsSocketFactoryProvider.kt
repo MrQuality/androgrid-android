@@ -1,5 +1,6 @@
 package com.androgrid.worker.network
 
+import com.androgrid.worker.enrollment.KeyEnrollmentUtils
 import java.io.ByteArrayInputStream
 import java.net.InetAddress
 import java.net.Socket
@@ -129,31 +130,7 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         val clientChain = clientCerts.toTypedArray()
 
         // 3. Parse Client Private Key (PKCS#8 DER)
-        val cleanKey = clientKeyPem
-            .replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "")
-            .replace("-----BEGIN EC PRIVATE KEY-----", "")
-            .replace("-----END EC PRIVATE KEY-----", "")
-            .replace("-----BEGIN RSA PRIVATE KEY-----", "")
-            .replace("-----END RSA PRIVATE KEY-----", "")
-            .replace("\\s".toRegex(), "")
-
-        val keyBytes = try {
-            Base64.getDecoder().decode(cleanKey)
-        } catch (e: Exception) {
-            throw IllegalArgumentException("Client private key PEM contains invalid base64 data", e)
-        }
-
-        val keySpec = PKCS8EncodedKeySpec(keyBytes)
-        val privateKey = try {
-            KeyFactory.getInstance("EC").generatePrivate(keySpec)
-        } catch (_: Exception) {
-            try {
-                KeyFactory.getInstance("RSA").generatePrivate(keySpec)
-            } catch (e2: Exception) {
-                throw IllegalArgumentException("Client private key is neither valid EC nor RSA PKCS#8 key", e2)
-            }
-        }
+        val privateKey = KeyEnrollmentUtils.parsePrivateKey(clientKeyPem)
 
         // 4. Build Client Identity KeyStore
         val clientStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {

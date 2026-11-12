@@ -4,18 +4,21 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import com.androgrid.worker.network.MtlsContext
 import com.androgrid.worker.network.MtlsTls13SocketFactory
-import java.io.ByteArrayInputStream
+import java.net.Socket
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.Principal
 import java.security.PrivateKey
 import java.security.SecureRandom
-import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509ExtendedKeyManager
+import javax.net.ssl.X509KeyManager
 import javax.net.ssl.X509TrustManager
 
 /**
@@ -77,12 +80,14 @@ class AndroidKeyStoreEnrollmentProvider : KeyEnrollmentProvider {
     }
 
     override fun createMtlsContext(alias: String, caCertPem: String): MtlsContext {
-        // 1. Build TrustManager with Root CA
-        val cf = CertificateFactory.getInstance("X.509")
-        val caCert = cf.generateCertificate(ByteArrayInputStream(caCertPem.toByteArray(Charsets.UTF_8)))
+        // 1. Build TrustStore with CA certificate chain
+        val caCerts = KeyEnrollmentUtils.parseCertificateChain(caCertPem)
+        require(caCerts.isNotEmpty()) { "No valid CA certificates found in PEM" }
         val trustStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
             load(null, null)
-            setCertificateEntry("ca_root", caCert)
+            caCerts.forEachIndexed { index, cert ->
+                setCertificateEntry("ca_root_$index", cert)
+            }
         }
 
         val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
@@ -90,13 +95,33 @@ class AndroidKeyStoreEnrollmentProvider : KeyEnrollmentProvider {
         }
         val trustManager = tmf.trustManagers.first { it is X509TrustManager } as X509TrustManager
 
-        // 2. Build KeyManager directly from AndroidKeyStore
+        // 2. Build KeyManager filtered specifically to the provided alias
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
             init(keyStore, null)
         }
+        val defaultKm = kmf.keyManagers.filterIsInstance<X509KeyManager>().firstOrNull()
+            ?: throw IllegalStateException("No X509KeyManager found in KeyManagerFactory")
+
+        val aliasKeyManager = object : X509ExtendedKeyManager() {
+            override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String = alias
+            override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
+            override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
+            override fun getCertificateChain(aliasParam: String?): Array<X509Certificate>? {
+                val chain = keyStore.getCertificateChain(aliasParam ?: alias) ?: return null
+                return chain.filterIsInstance<X509Certificate>().toTypedArray()
+            }
+            override fun getPrivateKey(aliasParam: String?): PrivateKey? =
+                keyStore.getKey(aliasParam ?: alias, null) as? PrivateKey
+            override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
+                defaultKm.getServerAliases(keyType, issuers)
+            override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? =
+                defaultKm.chooseServerAlias(keyType, issuers, socket)
+            override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
+                (defaultKm as? X509ExtendedKeyManager)?.chooseEngineServerAlias(keyType, issuers, engine)
+        }
 
         val sslContext = SSLContext.getInstance("TLSv1.3").apply {
-            init(kmf.keyManagers, arrayOf(trustManager), SecureRandom())
+            init(arrayOf(aliasKeyManager), arrayOf(trustManager), SecureRandom())
         }
 
         return MtlsContext(
