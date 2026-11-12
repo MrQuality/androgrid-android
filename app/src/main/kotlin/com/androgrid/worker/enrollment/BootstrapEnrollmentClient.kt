@@ -166,10 +166,28 @@ class GrpcBootstrapEnrollmentClient(
                     chain[i].checkValidity()
                 }
 
-                // Verify cryptographic signature path from leaf (chain[0]) to the anchor (chain[anchorIndex])
+                // Verify cryptographic signature path and CA authorization from leaf (chain[0]) to anchor (chain[anchorIndex])
                 for (i in 0 until anchorIndex) {
                     val subjectCert = chain[i]
                     val issuerCert = chain[i + 1]
+
+                    // RFC 5280 Section 4.2.1.9: Intermediate signers must be authorized CAs
+                    if (issuerCert.basicConstraints < 0) {
+                        throw CertificateException(
+                            "Certificate at index ${i + 1} (${issuerCert.subjectX500Principal.name}) " +
+                                "is not authorized as a CA (basicConstraints < 0)"
+                        )
+                    }
+
+                    // RFC 5280 Section 4.2.1.3: Intermediate signers must have keyCertSign asserted
+                    val keyUsage = issuerCert.keyUsage
+                    if (keyUsage != null && (keyUsage.size <= 5 || !keyUsage[5])) {
+                        throw CertificateException(
+                            "Certificate at index ${i + 1} (${issuerCert.subjectX500Principal.name}) " +
+                                "lacks keyCertSign key usage"
+                        )
+                    }
+
                     try {
                         subjectCert.verify(issuerCert.publicKey)
                     } catch (e: Exception) {

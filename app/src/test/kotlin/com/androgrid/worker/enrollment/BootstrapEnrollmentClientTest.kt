@@ -229,4 +229,37 @@ class BootstrapEnrollmentClientTest {
         }
         assertThat(exception.message).contains("does not contain trusted anchor")
     }
+
+    @Test
+    fun pinningTrustManager_leafAsIntermediateCa_throwsCertificateException() {
+        val client = GrpcBootstrapEnrollmentClient()
+        val trustManager = client.createPinningTrustManager(validFingerprint)
+
+        val caCert = KeyEnrollmentUtils.parseX509Certificate(testCaCertPem)
+        val clientCert = KeyEnrollmentUtils.parseX509Certificate(testClientCertPem)
+        val clientPrivateKey = KeyEnrollmentUtils.parsePrivateKey(TestCertificateFixtures.clientPrivateKeyPem)
+
+        // Generate a forged server cert signed by clientCert (which has basicConstraints == -1)
+        val kpg = KeyPairGenerator.getInstance("EC").apply { initialize(256) }
+        val serverKeyPair = kpg.generateKeyPair()
+        val signer = JcaContentSignerBuilder("SHA256withECDSA").build(clientPrivateKey)
+        val now = System.currentTimeMillis()
+        val certBuilder = JcaX509v3CertificateBuilder(
+            X500Name(clientCert.subjectX500Principal.name),
+            BigInteger.valueOf(now),
+            Date(now - 60_000),
+            Date(now + 3_600_000),
+            X500Name("CN=Forged Server"),
+            serverKeyPair.public
+        )
+        val forgedServerCert = JcaX509CertificateConverter().getCertificate(certBuilder.build(signer))
+
+        // Rogue chain: [forgedServerCert, clientCert, caCert]
+        val rogueChain: Array<X509Certificate> = arrayOf(forgedServerCert, clientCert, caCert)
+
+        val exception = assertThrows(CertificateException::class.java) {
+            trustManager.checkServerTrusted(rogueChain, "ECDHE_ECDSA")
+        }
+        assertThat(exception.message).contains("is not authorized as a CA (basicConstraints < 0)")
+    }
 }
