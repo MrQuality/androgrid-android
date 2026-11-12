@@ -88,7 +88,7 @@ class ReleaseAutomationIntegrityTest {
      * reflection-free Protobuf Lite models, gRPC OkHttp transport, Chicory WASM runtime,
      * and Jetpack WorkManager worker classes.
      *
-     * Traces to: [REQ-VER-002], [NFR-PERF-001]
+     * Traces to: [REQ-VER-002], [REQ-OP-001]
      */
     @Test
     fun testProguardRulesPreserveCriticalDependencies() {
@@ -96,21 +96,46 @@ class ReleaseAutomationIntegrityTest {
         val proguardFile = File(rootDir, "app/proguard-rules.pro")
         assertThat(proguardFile.exists()).isTrue()
 
-        val content = proguardFile.readText(Charsets.UTF_8)
-        assertThat(content).isNotEmpty()
+        val rawContent = proguardFile.readText(Charsets.UTF_8)
+        assertThat(rawContent).isNotEmpty()
 
-        // Verify Protobuf Lite preservation
-        assertThat(content).contains("com.google.protobuf")
+        // Verify comments do not make false claims regarding reflection-free status
+        assertThat(rawContent).doesNotContain("reflection-free")
+
+        // Strip comments and empty lines to assert active executable directives
+        val activeLines = proguardFile.readLines(Charsets.UTF_8)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+        val activeDirectives = activeLines.joinToString("\n")
+
+        // Verify Protobuf Lite runtime preservation
+        assertThat(activeDirectives).contains("com.google.protobuf")
+
+        // Verify obsolete and phantom namespaces are eliminated
+        assertThat(activeDirectives).doesNotContain("com.androgrid.contract")
+
+        // Verify first-party contract warnings are never suppressed
+        assertThat(activeDirectives).doesNotContain("-dontwarn com.androgrid.v1")
+
+        // Verify type-hierarchical field preservation on instantiated GeneratedMessageLite subclasses
+        assertThat(activeDirectives).contains("-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite")
+        assertThat(activeDirectives).contains("<fields>;")
+        assertThat(activeDirectives).contains("-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite\$Builder")
+        assertThat(activeDirectives).doesNotContain("-keep class * extends com.google.protobuf.GeneratedMessageLite\$Builder")
+
+        // Verify mobile worker client gRPC service stubs are preserved
+        assertThat(activeDirectives).contains("com.androgrid.v1.AndroGridServiceGrpc")
+        assertThat(activeDirectives).contains("com.androgrid.v1.EnrollmentServiceGrpc")
 
         // Verify gRPC transport preservation
-        assertThat(content).contains("io.grpc")
+        assertThat(activeDirectives).contains("io.grpc")
 
         // Verify Chicory WASM runtime preservation
-        assertThat(content).contains("com.dylibso.chicory")
+        assertThat(activeDirectives).contains("com.dylibso.chicory")
 
         // Verify Jetpack WorkManager and Worker preservation
-        assertThat(content).contains("androidx.work")
-        assertThat(content).contains("com.androgrid.worker.service")
+        assertThat(activeDirectives).contains("androidx.work")
+        assertThat(activeDirectives).contains("com.androgrid.worker.service")
     }
 
     /**

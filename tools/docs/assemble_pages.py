@@ -20,7 +20,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title} - AndroGrid Android Worker</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="{base_path}style.css">
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <script>
         document.addEventListener("DOMContentLoaded", function() {{
@@ -31,15 +31,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
     <header class="navbar">
         <div class="nav-container">
-            <a href="index.html" class="nav-brand">
+            <a href="{base_path}index.html" class="nav-brand">
                 <span class="pulse-dot"></span>
                 AndroGrid Android Worker
             </a>
             <nav class="nav-links">
-                <a href="index.html">Overview</a>
-                <a href="worker-guide.html">Onboarding Guide</a>
-                <a href="architecture.html">Architecture</a>
-                <a href="dokka/index.html">Dokka KDoc API</a>
+                <a href="{base_path}index.html">Overview</a>
+                <a href="{base_path}worker-guide.html">Onboarding Guide</a>
+                <a href="{base_path}architecture.html">Architecture</a>
+                <a href="{base_path}dokka/index.html">Dokka KDoc API</a>
                 <a href="https://mrquality.github.io/androgrid-backend/" target="_blank" class="nav-ext">Central Portal &nearr;</a>
             </nav>
         </div>
@@ -418,7 +418,11 @@ def markdown_to_html(md_text: str) -> str:
             continue
 
         if in_code:
-            html_lines.append(line)
+            if code_lang == "mermaid":
+                html_lines.append(line)
+            else:
+                escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                html_lines.append(escaped)
             continue
 
         # Handle tables
@@ -483,9 +487,17 @@ def markdown_to_html(md_text: str) -> str:
 
     content = re.sub(r"!\[(.*?)\]\((.*?)\)", inline_img_replace, content)
     # Convert inline code and strong
-    content = re.sub(r"`([^`]+)`", r"<code>\1</code>", content)
-    content = re.sub(r"\*\*([^\*]+)\*\*", r"<strong>\1</strong>", content)
+    def inline_code_replace(match):
+        code_text = match.group(1).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("*", "&#42;")
+        return f"<code>{code_text}</code>"
+
+    content = re.sub(r"`([^`\n]+)`", inline_code_replace, content)
+    content = re.sub(r"\*\*([^\*\n]+)\*\*", r"<strong>\1</strong>", content)
     content = re.sub(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', content)
+    # Rewrite relative ADR and traceability markdown links to HTML for browser navigation
+    content = re.sub(r'href="adr/(ADR-[^"]+)\.md"', r'href="adr/\1.html"', content)
+    content = re.sub(r'href="(ADR-[^"]+)\.md"', r'href="\1.html"', content)
+    content = re.sub(r'href="traceability_matrix\.md"', r'href="traceability_matrix.html"', content)
     return content
 
 
@@ -496,7 +508,7 @@ def assemble_site(project_root: Path, output_dir: Path):
     (output_dir / "style.css").write_text(CSS_STYLES, encoding="utf-8")
 
     # 2. Write index.html
-    landing_html = HTML_TEMPLATE.format(title="Overview", content=LANDING_BODY)
+    landing_html = HTML_TEMPLATE.format(base_path="", title="Overview", content=LANDING_BODY)
     (output_dir / "index.html").write_text(landing_html, encoding="utf-8")
 
     # 3. Convert docs/worker-guide.md
@@ -504,7 +516,7 @@ def assemble_site(project_root: Path, output_dir: Path):
     if worker_guide_md.exists():
         raw_md = worker_guide_md.read_text(encoding="utf-8")
         body_html = markdown_to_html(raw_md)
-        page_html = HTML_TEMPLATE.format(title="Onboarding Guide", content=body_html)
+        page_html = HTML_TEMPLATE.format(base_path="", title="Onboarding Guide", content=body_html)
         (output_dir / "worker-guide.html").write_text(page_html, encoding="utf-8")
         print("[+] Generated worker-guide.html")
 
@@ -513,9 +525,32 @@ def assemble_site(project_root: Path, output_dir: Path):
     if arch_md.exists():
         raw_md = arch_md.read_text(encoding="utf-8")
         body_html = markdown_to_html(raw_md)
-        page_html = HTML_TEMPLATE.format(title="Architecture", content=body_html)
+        page_html = HTML_TEMPLATE.format(base_path="", title="Architecture", content=body_html)
         (output_dir / "architecture.html").write_text(page_html, encoding="utf-8")
         print("[+] Generated architecture.html")
+
+    # 4b. Convert docs/adr/*.md to site/adr/*.html and copy raw .md files
+    adr_src_dir = project_root / "docs" / "adr"
+    adr_dest_dir = output_dir / "adr"
+    adr_dest_dir.mkdir(parents=True, exist_ok=True)
+    if adr_src_dir.exists():
+        for adr_path in sorted(adr_src_dir.glob("*.md")):
+            raw_adr = adr_path.read_text(encoding="utf-8")
+            body_html = markdown_to_html(raw_adr)
+            page_html = HTML_TEMPLATE.format(base_path="../", title=adr_path.stem, content=body_html)
+            (adr_dest_dir / f"{adr_path.stem}.html").write_text(page_html, encoding="utf-8")
+            (adr_dest_dir / adr_path.name).write_text(raw_adr, encoding="utf-8")
+            print(f"[+] Generated adr/{adr_path.stem}.html and {adr_path.name}")
+
+    # 4c. Convert docs/traceability_matrix.md to site/traceability_matrix.html and copy raw .md
+    matrix_md = project_root / "docs" / "traceability_matrix.md"
+    if matrix_md.exists():
+        raw_md = matrix_md.read_text(encoding="utf-8")
+        body_html = markdown_to_html(raw_md)
+        page_html = HTML_TEMPLATE.format(base_path="", title="Traceability Matrix", content=body_html)
+        (output_dir / "traceability_matrix.html").write_text(page_html, encoding="utf-8")
+        (output_dir / "traceability_matrix.md").write_text(raw_md, encoding="utf-8")
+        print("[+] Generated traceability_matrix.html and copied traceability_matrix.md")
 
     # 5. Copy Dokka HTML output
     dokka_src = project_root / "app" / "build" / "dokka" / "html"

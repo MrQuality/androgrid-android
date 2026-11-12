@@ -139,7 +139,8 @@ class DocumentationIntegrityTest {
             "ADR-002-cellular-radio-power-optimization.md",
             "ADR-003-typed-foreground-service-and-workmanager.md",
             "ADR-004-in-memory-wasm-wasi-execution.md",
-            "ADR-005-rooted-device-demarcation.md"
+            "ADR-005-rooted-device-demarcation.md",
+            "ADR-006-r8-protobuf-schema-preservation.md"
         )
 
         for (adrFileName in expectedAdrs) {
