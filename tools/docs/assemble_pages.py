@@ -418,7 +418,11 @@ def markdown_to_html(md_text: str) -> str:
             continue
 
         if in_code:
-            html_lines.append(line)
+            if code_lang == "mermaid":
+                html_lines.append(line)
+            else:
+                escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                html_lines.append(escaped)
             continue
 
         # Handle tables
@@ -483,12 +487,17 @@ def markdown_to_html(md_text: str) -> str:
 
     content = re.sub(r"!\[(.*?)\]\((.*?)\)", inline_img_replace, content)
     # Convert inline code and strong
-    content = re.sub(r"`([^`]+)`", r"<code>\1</code>", content)
-    content = re.sub(r"\*\*([^\*]+)\*\*", r"<strong>\1</strong>", content)
+    def inline_code_replace(match):
+        code_text = match.group(1).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("*", "&#42;")
+        return f"<code>{code_text}</code>"
+
+    content = re.sub(r"`([^`\n]+)`", inline_code_replace, content)
+    content = re.sub(r"\*\*([^\*\n]+)\*\*", r"<strong>\1</strong>", content)
     content = re.sub(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', content)
-    # Rewrite relative ADR markdown links to HTML for browser navigation
+    # Rewrite relative ADR and traceability markdown links to HTML for browser navigation
     content = re.sub(r'href="adr/(ADR-[^"]+)\.md"', r'href="adr/\1.html"', content)
     content = re.sub(r'href="(ADR-[^"]+)\.md"', r'href="\1.html"', content)
+    content = re.sub(r'href="traceability_matrix\.md"', r'href="traceability_matrix.html"', content)
     return content
 
 
@@ -532,6 +541,16 @@ def assemble_site(project_root: Path, output_dir: Path):
             (adr_dest_dir / f"{adr_path.stem}.html").write_text(page_html, encoding="utf-8")
             (adr_dest_dir / adr_path.name).write_text(raw_adr, encoding="utf-8")
             print(f"[+] Generated adr/{adr_path.stem}.html and {adr_path.name}")
+
+    # 4c. Convert docs/traceability_matrix.md to site/traceability_matrix.html and copy raw .md
+    matrix_md = project_root / "docs" / "traceability_matrix.md"
+    if matrix_md.exists():
+        raw_md = matrix_md.read_text(encoding="utf-8")
+        body_html = markdown_to_html(raw_md)
+        page_html = HTML_TEMPLATE.format(base_path="", title="Traceability Matrix", content=body_html)
+        (output_dir / "traceability_matrix.html").write_text(page_html, encoding="utf-8")
+        (output_dir / "traceability_matrix.md").write_text(raw_md, encoding="utf-8")
+        print("[+] Generated traceability_matrix.html and copied traceability_matrix.md")
 
     # 5. Copy Dokka HTML output
     dokka_src = project_root / "app" / "build" / "dokka" / "html"
