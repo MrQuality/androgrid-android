@@ -155,6 +155,7 @@ For detailed design decisions and architectural trade-offs, consult the dedicate
 * [ADR-004: In-Memory WebAssembly/WASI Execution without Dynamic Shared Library Disk Emission](adr/ADR-004-in-memory-wasm-wasi-execution.md)
 * [ADR-005: Rooted Device Demarcation and Toybox User Sandbox Separation](adr/ADR-005-rooted-device-demarcation.md)
 * [ADR-006: Protobuf Lite Schema Preservation and Hermetic R8 Obfuscation Contract](adr/ADR-006-r8-protobuf-schema-preservation.md)
+* [ADR-007: gRPC-OkHttp TLS 1.2 and 1.3 Cipher Suite Negotiation for Mobile mTLS Transport](adr/ADR-007-grpc-okhttp-tls-cipher-negotiation.md)
 
 ---
 
