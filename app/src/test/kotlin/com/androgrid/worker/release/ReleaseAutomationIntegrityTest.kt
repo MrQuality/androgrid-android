@@ -102,6 +102,15 @@ class ReleaseAutomationIntegrityTest {
         // Verify Protobuf Lite preservation
         assertThat(content).contains("com.google.protobuf")
 
+        // Verify generated Protobuf contracts are correctly targeted to com.androgrid.v1
+        assertThat(content).doesNotContain("com.androgrid.contract")
+        assertThat(content).contains("com.androgrid.v1")
+
+        // Verify type-hierarchical preservation for all GeneratedMessageLite subclasses and fields
+        assertThat(content).contains("* extends com.google.protobuf.GeneratedMessageLite")
+        assertThat(content).contains("<fields>;")
+        assertThat(content).contains("* extends com.google.protobuf.GeneratedMessageLite\$Builder")
+
         // Verify gRPC transport preservation
         assertThat(content).contains("io.grpc")
 

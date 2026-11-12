@@ -8,9 +8,16 @@
 -keep class com.google.protobuf.** { *; }
 -dontwarn com.google.protobuf.**
 
+# Preserve all generated Protobuf Lite message models, builders, and schema fields
+-keep class * extends com.google.protobuf.GeneratedMessageLite {
+    <fields>;
+    public *;
+}
+-keep class * extends com.google.protobuf.GeneratedMessageLite$Builder { *; }
+
 # Preserve generated AndroGrid protocol buffer classes
--keep class com.androgrid.contract.** { *; }
--dontwarn com.androgrid.contract.**
+-keep class com.androgrid.v1.** { *; }
+-dontwarn com.androgrid.v1.**
 
 # -----------------------------------------------------------------------------
 # gRPC Java & OkHttp Transport Layer
