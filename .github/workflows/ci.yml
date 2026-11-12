@@ -36,5 +36,8 @@ jobs:
       - name: Run Unit Tests and Invariant Audits
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
+      - name: Verify R8 Minification and Obfuscation Integrity
+        run: ./gradlew minifyReleaseWithR8 --no-daemon --stacktrace
+
       - name: Generate Dokka KDoc API Documentation
         run: ./gradlew dokkaHtml --no-daemon --stacktrace
