@@ -11,6 +11,7 @@ import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
 import com.androgrid.v1.ClaimCellularTaskRequest
 import com.androgrid.v1.NetworkTransportType
+import com.androgrid.worker.AndroGridApplication
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
 import com.androgrid.worker.capability.AndroidSystemInfoProvider
 import com.androgrid.worker.capability.BatteryStatusProvider
@@ -23,8 +24,14 @@ import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener
 import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.SharedPreferencesTaskLedgerRepository
+import com.androgrid.worker.telemetry.TaskLedgerEntry
+import com.androgrid.worker.telemetry.TaskLedgerRepository
+import com.androgrid.worker.telemetry.TaskLedgerStatus
 import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import io.grpc.ManagedChannel
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 /**
@@ -42,7 +49,8 @@ class CellularSpotWorkerLogic(
     private val dispatcher: TaskExecutionDispatcher = TaskExecutionDispatcher(),
     private val channelProvider: (() -> ManagedChannel)? = null,
     private val thermalListener: DeviceThermalStatusListener? = null,
-    private val thermalGuard: ThermalSafetyGuard = ThermalSafetyGuard()
+    private val thermalGuard: ThermalSafetyGuard = ThermalSafetyGuard(),
+    private val ledgerRepository: TaskLedgerRepository? = null
 ) {
     /**
      * Executes single spot task cycle: battery & thermal checks -> claim -> execute -> submit.
@@ -116,9 +124,31 @@ class CellularSpotWorkerLogic(
             cellularClient.submitResult(submitRequest)
         }
 
+        val isStale = isStaleAttemptError(submitResult.exceptionOrNull())
+        val ledgerStatus = when {
+            !executionResult.isSuccess -> TaskLedgerStatus.FAILED
+            submitResult.isSuccess -> TaskLedgerStatus.COMPLETED
+            isStale -> TaskLedgerStatus.STALE
+            else -> TaskLedgerStatus.SUBMISSION_FAILED
+        }
+        withContext(NonCancellable) {
+            ledgerRepository?.recordTaskExecution(
+                TaskLedgerEntry(
+                    taskId = task.taskId,
+                    runAttempt = task.runAttempt,
+                    route = "CELLULAR_WAN",
+                    status = ledgerStatus,
+                    exitCode = executionResult.exitCode,
+                    errorCode = executionResult.errorCode,
+                    executionDurationMs = executionResult.executionDurationMs,
+                    completedAtEpochMs = System.currentTimeMillis()
+                )
+            )
+        }
+
         // Even if result was rejected due to preemption (TASK_ATTEMPT_STALE),
         // worker returns success to complete WorkManager cycle
-        return if (submitResult.isSuccess || isStaleAttemptError(submitResult.exceptionOrNull())) {
+        return if (submitResult.isSuccess || isStale) {
             androidx.work.ListenableWorker.Result.success()
         } else {
             androidx.work.ListenableWorker.Result.retry()
@@ -159,12 +189,16 @@ class CellularSpotWorker(
             sslSocketFactory = mtlsContext?.socketFactory
         )
 
+        val ledgerRepository = (appContext.applicationContext as? AndroGridApplication)?.taskLedgerRepository
+            ?: SharedPreferencesTaskLedgerRepository.getInstance(appContext)
+
         CellularSpotWorkerLogic(
             nodeId = NodeIdProvider.getOrCreateNodeId(appContext),
             batteryProvider = batteryProvider,
             capabilityProvider = capabilityProvider,
             cellularClient = cellularClient,
-            thermalListener = thermalListener
+            thermalListener = thermalListener,
+            ledgerRepository = ledgerRepository
         )
     }
 

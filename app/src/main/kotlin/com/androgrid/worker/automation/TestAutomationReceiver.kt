@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import com.androgrid.worker.AndroGridApplication
 import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.service.AndroidServiceController
@@ -66,16 +67,25 @@ class TestAutomationReceiver(
         val serviceController = serviceControllerProvider(context)
         val workScheduler = workSchedulerProvider(context)
 
+        val participationController = (context.applicationContext as? AndroGridApplication)?.participationController
         when (action) {
             ACTION_CONFIGURE_ENDPOINT -> {
                 handleConfigureEndpoint(context, intent, repo, serviceController)
             }
             ACTION_START_PARTICIPATION -> {
-                serviceController.startWifiSyncService()
+                if (participationController != null) {
+                    participationController.startParticipation()
+                } else {
+                    serviceController.startWifiSyncService()
+                }
             }
             ACTION_STOP_PARTICIPATION -> {
-                serviceController.stopWifiSyncService()
-                workScheduler.cancelCellularSpotWork()
+                if (participationController != null) {
+                    participationController.stopParticipation()
+                } else {
+                    serviceController.stopWifiSyncService()
+                    workScheduler.cancelCellularSpotWork()
+                }
             }
         }
     }
@@ -127,7 +137,12 @@ class TestAutomationReceiver(
         // Step 3: Handle optional auto-start flag
         val autoStart = intent.getBooleanExtra(EXTRA_AUTO_START, false)
         if (autoStart) {
-            serviceController.startWifiSyncService()
+            val participationController = (context.applicationContext as? AndroGridApplication)?.participationController
+            if (participationController != null) {
+                participationController.startParticipation()
+            } else {
+                serviceController.startWifiSyncService()
+            }
         }
     }
 }

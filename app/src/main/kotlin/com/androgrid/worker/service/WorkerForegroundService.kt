@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.androgrid.worker.AndroGridApplication
 import com.androgrid.worker.R
 import com.androgrid.v1.NetworkTransportType
 import com.androgrid.v1.RegisterNodeRequest
@@ -28,15 +29,23 @@ import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.network.WifiSyncClient
 import com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener
 import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.SharedPreferencesTaskLedgerRepository
+import com.androgrid.worker.telemetry.TaskLedgerEntry
+import com.androgrid.worker.telemetry.TaskLedgerRepository
+import com.androgrid.worker.telemetry.TaskLedgerStatus
 import com.androgrid.worker.telemetry.ThermalSafetyGuard
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
@@ -68,6 +77,12 @@ class WorkerForegroundService : Service() {
 
     private var wifiClient: WifiSyncClient? = null
     private val completedReports = ConcurrentLinkedQueue<TaskExecutionReport>()
+    private val inFlightTasks = ConcurrentHashMap.newKeySet<String>()
+
+    private fun resolveLedgerRepository(): TaskLedgerRepository {
+        return (applicationContext as? AndroGridApplication)?.taskLedgerRepository
+            ?: SharedPreferencesTaskLedgerRepository.getInstance(applicationContext)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -87,6 +102,9 @@ class WorkerForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START_SYNC -> {
+                (applicationContext as? AndroGridApplication)
+                    ?.participationController
+                    ?.syncActiveFromServiceStart()
                 startForegroundWithTypedNotification()
                 startSyncLoop()
             }
@@ -211,23 +229,58 @@ class WorkerForegroundService : Service() {
                             .addAllCompletedTasks(reportsToSend)
                             .build()
 
+                        val ledgerRepository = resolveLedgerRepository()
                         val syncResult = client.syncNodeState(syncRequest)
                         if (syncResult.isSuccess && !isThrottled) {
                             val response = syncResult.getOrNull()
                             response?.desiredTasksList?.forEach { desiredTask ->
+                                val attemptKey = "${desiredTask.taskId}:${desiredTask.runAttempt}"
+                                if (ledgerRepository.isRecorded(desiredTask.taskId, desiredTask.runAttempt)) {
+                                    return@forEach
+                                }
+                                if (!inFlightTasks.add(attemptKey)) {
+                                    return@forEach
+                                }
                                 // Dispatch assigned task concurrently in background
                                 launch {
-                                    val result = dispatcher.dispatch(desiredTask)
-                                    val report = result.toTaskExecutionReport(
-                                        taskId = desiredTask.taskId,
-                                        runAttempt = desiredTask.runAttempt,
-                                        state = if (result.exitCode == 0) {
-                                            TaskState.TASK_STATE_COMPLETED
-                                        } else {
-                                            TaskState.TASK_STATE_FAILED
+                                    try {
+                                        val result = dispatcher.dispatch(desiredTask)
+                                        val isSuccess = result.isSuccess
+                                        val report = result.toTaskExecutionReport(
+                                            taskId = desiredTask.taskId,
+                                            runAttempt = desiredTask.runAttempt,
+                                            state = if (isSuccess) {
+                                                TaskState.TASK_STATE_COMPLETED
+                                            } else {
+                                                TaskState.TASK_STATE_FAILED
+                                            }
+                                        )
+                                        // Enqueue outbound report before disk commit so sync is never delayed
+                                        completedReports.add(report)
+                                        withContext(NonCancellable) {
+                                            ledgerRepository.recordTaskExecution(
+                                                TaskLedgerEntry(
+                                                    taskId = desiredTask.taskId,
+                                                    runAttempt = desiredTask.runAttempt,
+                                                    route = "WIFI_LAN",
+                                                    status = if (isSuccess) {
+                                                        TaskLedgerStatus.COMPLETED
+                                                    } else {
+                                                        TaskLedgerStatus.FAILED
+                                                    },
+                                                    exitCode = result.exitCode,
+                                                    errorCode = result.errorCode,
+                                                    executionDurationMs = result.executionDurationMs,
+                                                    completedAtEpochMs = System.currentTimeMillis()
+                                                )
+                                            )
                                         }
-                                    )
-                                    completedReports.add(report)
+                                    } catch (e: CancellationException) {
+                                        // Propagate coroutine cancellation cleanly without inflating failed count
+                                        throw e
+                                    } finally {
+                                        inFlightTasks.remove(attemptKey)
+                                    }
                                 }
                             }
                         }
