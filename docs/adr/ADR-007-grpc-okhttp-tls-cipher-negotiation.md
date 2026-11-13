@@ -39,6 +39,9 @@ An initial hotfix attempted to resolve this by permitting `TLSv1.2` in `MtlsTls1
 6. Furthermore, `createPinningTrustManager` checked signature chains but omitted RFC 5280 `basicConstraints >= 0` checks on intermediate certificates, creating a potential leaf-as-CA forgeability risk.
 7. `WifiSyncClient` and `CellularTransportClient` silently fell back to Android's system trust store with unauthenticated channels if mTLS credentials were null.
 
+### Rationale for Dual Enforcement (tlsConnectionSpec + MtlsTls13SocketFactory)
+While `tlsConnectionSpec` configures OkHttp's connection-level protocol filter, `MtlsTls13SocketFactory` remains essential as defense-in-depth: `grpc-okhttp` internally chooses between `INTERNAL_DEFAULT_CONNECTION_SPEC` (which includes TLS 1.3 only when `AndroidNegotiator` is loaded at runtime on a real Android platform) and `INTERNAL_LEGACY_CONNECTION_SPEC` (which defaults to TLS 1.2 on Robolectric or host JVM). Explicitly configuring both `tlsConnectionSpec` on `OkHttpChannelBuilder` and `MtlsTls13SocketFactory` on the underlying `SSLSocketFactory` guarantees hermetic TLS 1.3 enforcement across real device runtimes and host unit test environments without relying on undocumented library defaults.
+
 ---
 
 ## Decision
