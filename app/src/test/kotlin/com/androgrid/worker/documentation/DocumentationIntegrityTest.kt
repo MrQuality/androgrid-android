@@ -141,7 +141,8 @@ class DocumentationIntegrityTest {
             "ADR-004-in-memory-wasm-wasi-execution.md",
             "ADR-005-rooted-device-demarcation.md",
             "ADR-006-r8-protobuf-schema-preservation.md",
-            "ADR-007-grpc-okhttp-tls-cipher-negotiation.md"
+            "ADR-007-grpc-okhttp-tls-cipher-negotiation.md",
+            "ADR-008-task-execution-ledger-and-lifecycle-persistence.md"
         )
 
         for (adrFileName in expectedAdrs) {

@@ -156,6 +156,7 @@ For detailed design decisions and architectural trade-offs, consult the dedicate
 * [ADR-005: Rooted Device Demarcation and Toybox User Sandbox Separation](adr/ADR-005-rooted-device-demarcation.md)
 * [ADR-006: Protobuf Lite Schema Preservation and Hermetic R8 Obfuscation Contract](adr/ADR-006-r8-protobuf-schema-preservation.md)
 * [ADR-007: Strict TLS 1.3 Channel Configuration and RFC 5280 Trust Pinning Validation](adr/ADR-007-grpc-okhttp-tls-cipher-negotiation.md)
+* [ADR-008: Task Execution Ledger and Lifecycle-Aware Observability Persistence](adr/ADR-008-task-execution-ledger-and-lifecycle-persistence.md)
 
 ---
 
