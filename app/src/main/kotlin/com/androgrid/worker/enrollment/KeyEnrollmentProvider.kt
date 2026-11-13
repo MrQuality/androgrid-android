@@ -149,7 +149,7 @@ class SoftwareKeyEnrollmentProvider : KeyEnrollmentProvider {
             init(clientKeyStore, charArrayOf())
         }
 
-        val sslContext = SSLContext.getInstance("TLSv1.3").apply {
+        val sslContext = MtlsContext.createSslContext().apply {
             init(kmf.keyManagers, arrayOf(trustManager), SecureRandom())
         }
 

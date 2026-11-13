@@ -35,6 +35,18 @@ data class MtlsContext(
             "TLS_AES_256_GCM_SHA384",
             "TLS_CHACHA20_POLY1305_SHA256"
         )
+
+        /**
+         * Creates an SSLContext with graceful fallback from TLSv1.3 to TLS on legacy platforms
+         * such as stock Android 9 (API 28, our minSdk) where TLSv1.3 is not an algorithm identifier.
+         */
+        fun createSslContext(): SSLContext {
+            return try {
+                SSLContext.getInstance("TLSv1.3")
+            } catch (_: Exception) {
+                SSLContext.getInstance("TLS")
+            }
+        }
     }
 }
 
@@ -148,12 +160,9 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
             ?: throw IllegalStateException("No X509TrustManager found in TrustManagerFactory")
 
-        val sslContext = try {
-            SSLContext.getInstance("TLSv1.3")
-        } catch (_: Exception) {
-            SSLContext.getInstance("TLS")
+        val sslContext = MtlsContext.createSslContext().apply {
+            init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
         }
-        sslContext.init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
 
         return MtlsContext(
             socketFactory = MtlsTls13SocketFactory(sslContext.socketFactory),
@@ -197,12 +206,9 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
             ?: throw IllegalStateException("No X509TrustManager found in TrustManagerFactory")
 
-        val sslContext = try {
-            SSLContext.getInstance("TLSv1.3")
-        } catch (_: Exception) {
-            SSLContext.getInstance("TLS")
+        val sslContext = MtlsContext.createSslContext().apply {
+            init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
         }
-        sslContext.init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
 
         return MtlsContext(
             socketFactory = MtlsTls13SocketFactory(sslContext.socketFactory),

@@ -120,7 +120,7 @@ class AndroidKeyStoreEnrollmentProvider : KeyEnrollmentProvider {
                 (defaultKm as? X509ExtendedKeyManager)?.chooseEngineServerAlias(keyType, issuers, engine)
         }
 
-        val sslContext = SSLContext.getInstance("TLSv1.3").apply {
+        val sslContext = MtlsContext.createSslContext().apply {
             init(arrayOf(aliasKeyManager), arrayOf(trustManager), SecureRandom())
         }
 

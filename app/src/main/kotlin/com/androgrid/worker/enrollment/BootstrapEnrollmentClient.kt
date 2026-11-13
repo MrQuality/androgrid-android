@@ -215,7 +215,7 @@ class GrpcBootstrapEnrollmentClient(
     private fun buildPinnedChannel(host: String, port: Int, expectedFingerprintHex: String): ManagedChannel {
         val pinningTrustManager = createPinningTrustManager(expectedFingerprintHex)
 
-        val sslContext = SSLContext.getInstance("TLSv1.3").apply {
+        val sslContext = MtlsContext.createSslContext().apply {
             init(null, arrayOf<TrustManager>(pinningTrustManager), SecureRandom())
         }
 
