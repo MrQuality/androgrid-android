@@ -1,6 +1,7 @@
 package com.androgrid.worker.ui
 
 import android.Manifest
+import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -20,7 +21,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.androgrid.worker.AndroGridApplication
+import com.androgrid.worker.telemetry.InMemoryTaskLedgerRepository
+import com.androgrid.worker.service.WorkerParticipationController
 import com.androgrid.worker.R
 import com.androgrid.worker.automation.PkiCredentialLoader
 import com.androgrid.worker.automation.TestAutomationReceiver
@@ -53,8 +61,7 @@ class MainActivity : ComponentActivity() {
     internal var settingsRepository: ClusterSettingsRepository? = null
 
     private lateinit var viewModel: WorkerDashboardViewModel
-    private lateinit var networkMonitor: NetworkRouteMonitor
-    private var thermalListener: com.androgrid.worker.telemetry.DeviceThermalStatusListener? = null
+    private var participationController: WorkerParticipationController? = null
 
     private lateinit var statusBannerView: TextView
     private lateinit var nodeIdView: TextView
@@ -64,6 +71,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var batteryView: TextView
     private lateinit var thermalBadgeView: TextView
     private lateinit var telemetryView: TextView
+    private lateinit var recentLedgerView: TextView
     private lateinit var toggleButton: Button
     private lateinit var scanEnrollmentButton: Button
     private lateinit var settingsButton: Button
@@ -185,45 +193,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        networkMonitor.stopMonitoring()
-        thermalListener?.stopListening()
+    override fun onStart() {
+        super.onStart()
+        participationController?.onUiStarted()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        participationController?.onUiStopped()
     }
 
     private fun initDependencies() {
-        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        networkMonitor = NetworkRouteMonitor(connectivityManager)
-        networkMonitor.startMonitoring()
-
-        val rootChecker = StandardRootChecker()
-        val systemInfo = AndroidSystemInfoProvider(applicationContext)
-        val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
-        val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
-
-        val deviceThermalListener = com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener(applicationContext).apply {
-            startListening()
-        }
-        thermalListener = deviceThermalListener
-
-        val serviceController = AndroidServiceController(applicationContext)
-        val workScheduler = AndroidWorkScheduler(applicationContext)
-        val coordinator = WorkerLifecycleCoordinator(
-            routeFlow = networkMonitor.currentRoute,
-            serviceController = serviceController,
-            workScheduler = workScheduler
-        )
-
-        val serial = NodeIdProvider.getOrCreateNodeId(applicationContext)
-
-        viewModel = WorkerDashboardViewModel(
-            nodeId = serial,
-            routeFlow = networkMonitor.currentRoute,
-            capabilityProvider = capabilityProvider,
-            batteryProvider = batteryProvider,
-            coordinator = coordinator,
-            thermalStatusListener = deviceThermalListener
-        )
+        val app = application as? AndroGridApplication
+        participationController = app?.participationController
+        viewModel = ViewModelProvider(
+            this,
+            WorkerDashboardViewModelFactory(application)
+        )[WorkerDashboardViewModel::class.java]
     }
 
     private fun setupContentView() {
@@ -278,6 +264,7 @@ class MainActivity : ComponentActivity() {
         batteryView = createMetricView()
         thermalBadgeView = createMetricView()
         telemetryView = createMetricView()
+        recentLedgerView = createMetricView()
 
         rootLayout.addView(nodeIdView)
         rootLayout.addView(hardwareView)
@@ -286,6 +273,7 @@ class MainActivity : ComponentActivity() {
         rootLayout.addView(batteryView)
         rootLayout.addView(thermalBadgeView)
         rootLayout.addView(telemetryView)
+        rootLayout.addView(recentLedgerView)
 
         scanEnrollmentButton = Button(this).apply {
             text = "Scan Enrollment QR Code"
@@ -369,8 +357,10 @@ class MainActivity : ComponentActivity() {
 
     private fun observeState() {
         lifecycleScope.launch {
-            viewModel.uiState.collect { state ->
-                renderState(state)
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.uiState.collect { state ->
+                    renderState(state)
+                }
             }
         }
     }
@@ -393,7 +383,15 @@ class MainActivity : ComponentActivity() {
         val tempText = if (state.batteryTemperatureCelsius > 0) "${state.batteryTemperatureCelsius} C" else "N/A"
         thermalBadgeView.text = "Thermal Guard: $tempText [${state.thermalStatusFormatted()}]"
         thermalBadgeView.setTextColor(Color.parseColor(state.thermalBadgeColorHex()))
-        telemetryView.text = "Tasks Executed: ${state.tasksCompletedCount}"
+        telemetryView.text = "Tasks Executed: ${state.tasksCompletedCount} | Failed: ${state.tasksFailedCount}"
+        recentLedgerView.text = if (state.recentEntries.isEmpty()) {
+            "Recent Tasks: None yet"
+        } else {
+            val lines = state.recentEntries.take(5).joinToString("\n") { entry ->
+                "  ${entry.taskId} #${entry.runAttempt} [${entry.route}] ${entry.status}"
+            }
+            "Recent Tasks:\n$lines"
+        }
 
         if (state.isComputeActive) {
             toggleButton.text = "Stop Compute Participation"
@@ -401,6 +399,63 @@ class MainActivity : ComponentActivity() {
         } else {
             toggleButton.text = "Start Compute Participation"
             toggleButton.setBackgroundColor(Color.parseColor("#2E7D32")) // Green
+        }
+    }
+
+    /**
+     * ViewModelProvider.Factory resolving Application-scoped dependencies for [WorkerDashboardViewModel]
+     * while preserving safe fallbacks in Robolectric test environments without [AndroGridApplication].
+     *
+     * Traces to: Section 6.1, [INV-003], [NFR-POW-001], ADR-008
+     */
+    private class WorkerDashboardViewModelFactory(
+        private val application: Application
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            val context = application.applicationContext
+            val app = application as? AndroGridApplication
+
+            val rootChecker = StandardRootChecker()
+            val systemInfo = AndroidSystemInfoProvider(context)
+            val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
+            val batteryProvider = AndroidBatteryStatusProvider(context)
+            val serial = NodeIdProvider.getOrCreateNodeId(context)
+
+            if (app != null) {
+                return WorkerDashboardViewModel(
+                    nodeId = serial,
+                    routeFlow = app.networkRouteMonitor.currentRoute,
+                    capabilityProvider = capabilityProvider,
+                    batteryProvider = batteryProvider,
+                    coordinator = app.lifecycleCoordinator,
+                    thermalStatusListener = app.thermalStatusListener,
+                    ledgerRepository = app.taskLedgerRepository,
+                    participationController = app.participationController
+                ) as T
+            }
+
+            // Fallback for isolated unit/Robolectric tests using plain android.app.Application
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val networkMonitor = NetworkRouteMonitor(connectivityManager).apply { startMonitoring() }
+            val thermalListener = com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener(context).apply {
+                startListening()
+            }
+            val coordinator = WorkerLifecycleCoordinator(
+                routeFlow = networkMonitor.currentRoute,
+                serviceController = AndroidServiceController(context),
+                workScheduler = AndroidWorkScheduler(context)
+            )
+            return WorkerDashboardViewModel(
+                nodeId = serial,
+                routeFlow = networkMonitor.currentRoute,
+                capabilityProvider = capabilityProvider,
+                batteryProvider = batteryProvider,
+                coordinator = coordinator,
+                thermalStatusListener = thermalListener,
+                ledgerRepository = InMemoryTaskLedgerRepository(),
+                participationController = null
+            ) as T
         }
     }
 }

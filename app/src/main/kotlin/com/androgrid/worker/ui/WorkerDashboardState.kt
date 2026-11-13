@@ -1,11 +1,12 @@
 package com.androgrid.worker.ui
 
 import com.androgrid.worker.network.NetworkRoute
+import com.androgrid.worker.telemetry.TaskLedgerEntry
 
 /**
  * UI State model for the mobile worker dashboard.
  *
- * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002], [INV-003], [NFR-POW-001]
+ * Traces to: Section 6.1, [REQ-VER-001], [REQ-VER-002], [INV-003], [NFR-POW-001], ADR-008
  */
 data class WorkerDashboardState(
     val nodeId: String,
@@ -21,6 +22,8 @@ data class WorkerDashboardState(
     val batteryTemperatureCelsius: Int = 0,
     val thermalStatus: Int = 0,
     val tasksCompletedCount: Int = 0,
+    val tasksFailedCount: Int = 0,
+    val recentEntries: List<TaskLedgerEntry> = emptyList(),
     val statusBannerText: String = "Offline: Execution Paused"
 ) {
     /**

@@ -19,6 +19,8 @@ import com.androgrid.worker.engine.TaskExecutionResult
 import com.androgrid.worker.network.CellularRpcInvoker
 import com.androgrid.worker.network.CellularTransportClient
 import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.InMemoryTaskLedgerRepository
+import com.androgrid.worker.telemetry.TaskLedgerStatus
 import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.ByteString
@@ -381,5 +383,168 @@ class CellularSpotWorkerTest {
     fun testWorkRequestConfiguration_enforcesExponentialBackoffCriteria() {
         val request = CellularSpotWorker.buildWorkRequest()
         assertThat(request.workSpec.backoffPolicy).isEqualTo(BackoffPolicy.EXPONENTIAL)
+    }
+
+    @Test
+    fun testSuccessfulExecution_recordsCompletedInLedger() = runTest {
+        // Traces to: [REQ-OP-003], [INV-004], ADR-008
+        val ledger = InMemoryTaskLedgerRepository()
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_ok")
+            .setRunAttempt(2)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom("payload".toByteArray()))
+            .build()
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            )
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            ledgerRepository = ledger
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        val snap = ledger.ledgerSnapshot.value
+        assertThat(snap.tasksCompletedCount).isEqualTo(1)
+        assertThat(snap.tasksFailedCount).isEqualTo(0)
+        assertThat(snap.recentEntries.first().status).isEqualTo(TaskLedgerStatus.COMPLETED)
+        assertThat(snap.recentEntries.first().route).isEqualTo("CELLULAR_WAN")
+    }
+
+    @Test
+    fun testFailedExecution_recordsFailedInLedger() = runTest {
+        // Traces to: [REQ-OP-003], ADR-008
+        val ledger = InMemoryTaskLedgerRepository()
+        val failingEngine = object : ComputeEngine {
+            override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+                return TaskExecutionResult(
+                    exitCode = 1,
+                    errorCode = "WASM_TRAP",
+                    stdoutBytes = ByteArray(0),
+                    stderrBytes = ByteArray(0),
+                    executionDurationMs = 15L
+                )
+            }
+        }
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_fail")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom("payload".toByteArray()))
+            .build()
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            )
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = failingEngine),
+            channelProvider = { MockChannel() },
+            ledgerRepository = ledger
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        val snap = ledger.ledgerSnapshot.value
+        assertThat(snap.tasksCompletedCount).isEqualTo(0)
+        assertThat(snap.tasksFailedCount).isEqualTo(1)
+        assertThat(snap.recentEntries.first().status).isEqualTo(TaskLedgerStatus.FAILED)
+        assertThat(snap.recentEntries.first().errorCode).isEqualTo("WASM_TRAP")
+    }
+
+    @Test
+    fun testPreemptedStaleTask_recordsStaleInLedger() = runTest {
+        // Traces to: [INV-004], ADR-008
+        val ledger = InMemoryTaskLedgerRepository()
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_stale")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom("payload".toByteArray()))
+            .build()
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            ),
+            submitResponse = Result.failure(
+                StatusRuntimeException(Status.FAILED_PRECONDITION.withDescription("TASK_ATTEMPT_STALE"))
+            )
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            ledgerRepository = ledger
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        val snap = ledger.ledgerSnapshot.value
+        assertThat(snap.tasksCompletedCount).isEqualTo(0)
+        assertThat(snap.tasksFailedCount).isEqualTo(0)
+        assertThat(snap.recentEntries.first().status).isEqualTo(TaskLedgerStatus.STALE)
+    }
+
+    @Test
+    fun testSubmitNetworkFailure_recordsSubmissionFailedAndAllowsRetryCompletion() = runTest {
+        // Traces to: [REQ-OP-003], [INV-004], ADR-008 (RSK-DEDUP-02)
+        val ledger = InMemoryTaskLedgerRepository()
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_retry")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom("payload".toByteArray()))
+            .build()
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            ),
+            submitResponse = Result.failure(StatusRuntimeException(Status.UNAVAILABLE))
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            ledgerRepository = ledger
+        )
+
+        val firstResult = workerLogic.executeSpotTask()
+
+        assertThat(firstResult).isEqualTo(ListenableWorker.Result.retry())
+        assertThat(ledger.ledgerSnapshot.value.recentEntries.first().status)
+            .isEqualTo(TaskLedgerStatus.SUBMISSION_FAILED)
+        assertThat(ledger.isRecorded("task_cell_retry", 1)).isFalse()
+
+        // Subsequent retry succeeds and is NOT blocked by prior SUBMISSION_FAILED
+        rpc.submitResponse = Result.success(
+            SubmitCellularResultResponse.newBuilder().setAccepted(true).build()
+        )
+        val secondResult = workerLogic.executeSpotTask()
+
+        assertThat(secondResult).isEqualTo(ListenableWorker.Result.success())
+        val snap = ledger.ledgerSnapshot.value
+        assertThat(snap.tasksCompletedCount).isEqualTo(1)
+        assertThat(snap.recentEntries.first().status).isEqualTo(TaskLedgerStatus.COMPLETED)
     }
 }
