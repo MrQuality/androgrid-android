@@ -103,24 +103,33 @@ class NetworkRouteMonitor(
         }
     }
 
+    private var isMonitoring: Boolean = false
+
     /**
-     * Registers network callback with Android ConnectivityManager.
+     * Registers network callback with Android ConnectivityManager idempotently.
      */
+    @Synchronized
     fun startMonitoring() {
+        if (isMonitoring) return
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
         connectivityManager.registerNetworkCallback(request, networkCallback)
+        isMonitoring = true
     }
 
     /**
-     * Unregisters network callback to prevent leaks.
+     * Unregisters network callback to prevent leaks idempotently.
      */
+    @Synchronized
     fun stopMonitoring() {
+        if (!isMonitoring) return
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
         } catch (_: Exception) {
             // Ignore if already unregistered
+        } finally {
+            isMonitoring = false
         }
     }
 }
