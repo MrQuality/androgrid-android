@@ -134,4 +134,40 @@ class WorkerParticipationControllerTest {
         scope.advanceUntilIdle()
         assertThat(controller2.isComputeActive.value).isTrue()
     }
+
+    @Test
+    fun testRapidParticipationToggles_persistFinalAuthoritativeState() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = TestScope(dispatcher)
+        val controller = DefaultWorkerParticipationController(
+            context = context,
+            networkMonitor = networkMonitor,
+            thermalListener = thermalListener,
+            coordinator = coordinator,
+            appScope = scope,
+            ioDispatcher = dispatcher
+        )
+        scope.advanceUntilIdle()
+
+        // Rapid toggles before IO coroutines drain
+        controller.startParticipation()
+        controller.stopParticipation()
+        controller.startParticipation()
+        controller.stopParticipation()
+        scope.advanceUntilIdle()
+
+        assertThat(controller.isComputeActive.value).isFalse()
+
+        // Rehydrate from SharedPreferences to verify disk matches final in-memory state
+        val rehydrated = DefaultWorkerParticipationController(
+            context = context,
+            networkMonitor = networkMonitor,
+            thermalListener = thermalListener,
+            coordinator = coordinator,
+            appScope = scope,
+            ioDispatcher = dispatcher
+        )
+        scope.advanceUntilIdle()
+        assertThat(rehydrated.isComputeActive.value).isFalse()
+    }
 }

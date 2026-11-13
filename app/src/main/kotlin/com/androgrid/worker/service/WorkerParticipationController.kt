@@ -13,7 +13,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.ContinuationInterceptor
 
 /**
  * Interface governing application-wide compute participation state and demand-gated monitors.
@@ -76,14 +79,19 @@ class DefaultWorkerParticipationController(
     override val isComputeActive: StateFlow<Boolean> = _isComputeActive.asStateFlow()
 
     private val stateLock = Any()
+    private val prefsMutex = Mutex()
     private var explicitToggleIssued = false
     private var activeUiCount = 0
 
     init {
         appScope.launch(ioDispatcher) {
-            val persistedActive = prefs.getBoolean(KEY_IS_COMPUTE_ACTIVE, false)
+            val persistedActive = prefsMutex.withLock {
+                prefs.getBoolean(KEY_IS_COMPUTE_ACTIVE, false)
+            }
             if (persistedActive) {
-                withContext(appScope.coroutineContext) {
+                val appDispatcher = appScope.coroutineContext[ContinuationInterceptor]
+                    ?: Dispatchers.Main.immediate
+                withContext(appDispatcher) {
                     val shouldRestore = synchronized(stateLock) {
                         !explicitToggleIssued && !_isComputeActive.value
                     }
@@ -114,7 +122,7 @@ class DefaultWorkerParticipationController(
             coordinator.handleRouteTransition(NetworkRoute.Offline)
             updateMonitorGatingLocked()
         }
-        persistActiveFlag(false)
+        persistActiveFlag()
     }
 
     override fun syncActiveFromServiceStart() {
@@ -153,7 +161,7 @@ class DefaultWorkerParticipationController(
             coordinator.handleRouteTransition(networkMonitor.currentRoute.value)
         }
         if (persist) {
-            persistActiveFlag(true)
+            persistActiveFlag()
         }
     }
 
@@ -168,9 +176,12 @@ class DefaultWorkerParticipationController(
         }
     }
 
-    private fun persistActiveFlag(active: Boolean) {
+    private fun persistActiveFlag() {
         appScope.launch(ioDispatcher) {
-            prefs.edit().putBoolean(KEY_IS_COMPUTE_ACTIVE, active).commit()
+            prefsMutex.withLock {
+                val authoritativeActive = synchronized(stateLock) { _isComputeActive.value }
+                prefs.edit().putBoolean(KEY_IS_COMPUTE_ACTIVE, authoritativeActive).commit()
+            }
         }
     }
 

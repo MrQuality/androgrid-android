@@ -187,7 +187,7 @@ class InMemoryTaskLedgerRepository : TaskLedgerRepository {
  *
  * Traces to: Section 6.1, [REQ-OP-002], [REQ-OP-003], [INV-004], [NFR-SEC-001], ADR-008
  */
-class SharedPreferencesTaskLedgerRepository(
+class SharedPreferencesTaskLedgerRepository private constructor(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     hydrationScope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher)
@@ -312,13 +312,17 @@ class SharedPreferencesTaskLedgerRepository(
                 val limit = minOf(entriesArray.length(), LedgerAccumulator.MAX_RECENT_ENTRIES)
                 for (i in 0 until limit) {
                     val obj = entriesArray.optJSONObject(i) ?: continue
+                    val taskId = obj.optString("taskId", "")
+                    if (taskId.isEmpty()) continue
+                    val runAttempt = obj.optInt("runAttempt", -1)
+                    if (runAttempt < 0) continue
                     val statusName = obj.optString("status", "")
                     val status = TaskLedgerStatus.entries.firstOrNull { it.name == statusName }
                         ?: continue
                     recentEntries.addLast(
                         TaskLedgerEntry(
-                            taskId = obj.getString("taskId"),
-                            runAttempt = obj.getInt("runAttempt"),
+                            taskId = taskId,
+                            runAttempt = runAttempt,
                             route = obj.optString("route", ""),
                             status = status,
                             exitCode = obj.optInt("exitCode", -1),
@@ -358,6 +362,23 @@ class SharedPreferencesTaskLedgerRepository(
             return instance ?: synchronized(this) {
                 instance ?: SharedPreferencesTaskLedgerRepository(context).also { instance = it }
             }
+        }
+
+        /**
+         * Creates an isolated [SharedPreferencesTaskLedgerRepository] instance with injected
+         * dispatchers/scopes for hermetic unit and Robolectric tests.
+         */
+        @VisibleForTesting
+        internal fun createForTesting(
+            context: Context,
+            ioDispatcher: CoroutineDispatcher,
+            hydrationScope: CoroutineScope
+        ): SharedPreferencesTaskLedgerRepository {
+            return SharedPreferencesTaskLedgerRepository(
+                context = context,
+                ioDispatcher = ioDispatcher,
+                hydrationScope = hydrationScope
+            )
         }
 
         /**

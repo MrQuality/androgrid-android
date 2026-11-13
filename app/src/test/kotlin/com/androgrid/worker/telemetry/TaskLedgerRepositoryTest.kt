@@ -130,7 +130,7 @@ class TaskLedgerRepositoryTest {
     @Test
     fun testSharedPreferencesPersistence_roundTripAndColdStartHydrationGuard() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val repo1 = SharedPreferencesTaskLedgerRepository(
+        val repo1 = SharedPreferencesTaskLedgerRepository.createForTesting(
             context = context,
             ioDispatcher = dispatcher,
             hydrationScope = TestScope(dispatcher)
@@ -141,7 +141,7 @@ class TaskLedgerRepositoryTest {
         // New repo with un-run background hydrationScope (StandardTestDispatcher queued but not run yet):
         // Immediate recordTaskExecution() must still run ensureHydratedLocked() before mutating!
         val repo2Scope = TestScope(StandardTestDispatcher(testScheduler))
-        val repo2 = SharedPreferencesTaskLedgerRepository(
+        val repo2 = SharedPreferencesTaskLedgerRepository.createForTesting(
             context = context,
             ioDispatcher = dispatcher,
             hydrationScope = repo2Scope
@@ -166,7 +166,7 @@ class TaskLedgerRepositoryTest {
         prefs.edit().putString(SharedPreferencesTaskLedgerRepository.KEY_LEDGER_JSON, "{not-valid-json").commit()
 
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val repoCorrupt = SharedPreferencesTaskLedgerRepository(
+        val repoCorrupt = SharedPreferencesTaskLedgerRepository.createForTesting(
             context = context,
             ioDispatcher = dispatcher,
             hydrationScope = TestScope(dispatcher)
@@ -180,7 +180,7 @@ class TaskLedgerRepositoryTest {
             """{"version":99,"completedCount":10}"""
         ).commit()
 
-        val repoVersion = SharedPreferencesTaskLedgerRepository(
+        val repoVersion = SharedPreferencesTaskLedgerRepository.createForTesting(
             context = context,
             ioDispatcher = dispatcher,
             hydrationScope = TestScope(dispatcher)
@@ -192,7 +192,7 @@ class TaskLedgerRepositoryTest {
     @Test
     fun testDataHygiene_stdoutAndStderrKeysAreExcludedFromPersistedJson() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val repo = SharedPreferencesTaskLedgerRepository(
+        val repo = SharedPreferencesTaskLedgerRepository.createForTesting(
             context = context,
             ioDispatcher = dispatcher,
             hydrationScope = TestScope(dispatcher)
@@ -212,7 +212,7 @@ class TaskLedgerRepositoryTest {
     @Test
     fun testConcurrentWrites_mutexSerializesAllTasksWithoutLostUpdates() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val repo = SharedPreferencesTaskLedgerRepository(
+        val repo = SharedPreferencesTaskLedgerRepository.createForTesting(
             context = context,
             ioDispatcher = dispatcher,
             hydrationScope = TestScope(dispatcher)
@@ -226,5 +226,41 @@ class TaskLedgerRepositoryTest {
         val results = jobs.awaitAll()
         assertThat(results.count { it }).isEqualTo(50)
         assertThat(repo.ledgerSnapshot.value.tasksCompletedCount).isEqualTo(50)
+    }
+
+    @Test
+    fun testMalformedSingleEntry_isSkippedWithoutWipingCountersOrSeenKeys() = runTest {
+        val prefs = context.getSharedPreferences(
+            SharedPreferencesTaskLedgerRepository.PREFS_NAME,
+            Context.MODE_PRIVATE
+        )
+        // One valid entry + one malformed entry missing taskId/runAttempt
+        val json = """
+            {
+              "version": 1,
+              "completedCount": 4,
+              "failedCount": 1,
+              "dedupKeys": ["t_valid:1"],
+              "recentEntries": [
+                {"route": "WIFI_LAN", "status": "COMPLETED"},
+                {"taskId": "t_valid", "runAttempt": 1, "route": "WIFI_LAN", "status": "COMPLETED", "exitCode": 0}
+              ]
+            }
+        """.trimIndent()
+        prefs.edit().putString(SharedPreferencesTaskLedgerRepository.KEY_LEDGER_JSON, json).commit()
+
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val repo = SharedPreferencesTaskLedgerRepository.createForTesting(
+            context = context,
+            ioDispatcher = dispatcher,
+            hydrationScope = TestScope(dispatcher)
+        )
+
+        assertThat(repo.isRecorded("t_valid", 1)).isTrue()
+        val snap = repo.ledgerSnapshot.value
+        assertThat(snap.tasksCompletedCount).isEqualTo(4)
+        assertThat(snap.tasksFailedCount).isEqualTo(1)
+        assertThat(snap.recentEntries).hasSize(1)
+        assertThat(snap.recentEntries.first().taskId).isEqualTo("t_valid")
     }
 }
