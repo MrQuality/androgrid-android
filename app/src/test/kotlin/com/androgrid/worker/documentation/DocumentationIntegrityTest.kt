@@ -140,7 +140,8 @@ class DocumentationIntegrityTest {
             "ADR-003-typed-foreground-service-and-workmanager.md",
             "ADR-004-in-memory-wasm-wasi-execution.md",
             "ADR-005-rooted-device-demarcation.md",
-            "ADR-006-r8-protobuf-schema-preservation.md"
+            "ADR-006-r8-protobuf-schema-preservation.md",
+            "ADR-007-grpc-okhttp-tls-cipher-negotiation.md"
         )
 
         for (adrFileName in expectedAdrs) {

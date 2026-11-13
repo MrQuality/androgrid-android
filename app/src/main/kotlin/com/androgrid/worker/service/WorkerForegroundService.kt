@@ -34,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -126,107 +127,130 @@ class WorkerForegroundService : Service() {
             val systemInfo = AndroidSystemInfoProvider(applicationContext)
             val capabilityProvider = DeviceCapabilityProvider(rootChecker, systemInfo)
             val dispatcher = TaskExecutionDispatcher()
-
             val settingsRepo = SharedPreferencesClusterSettingsRepository.getInstance(applicationContext)
-            val settings = settingsRepo.getSettings()
-            val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
 
-            val authority = if (settings.wifiHost == "10.0.2.2" || settings.wifiHost == "127.0.0.1") "localhost" else null
-            val client = WifiSyncClient(
-                host = settings.wifiHost,
-                port = settings.wifiPort,
-                sslSocketFactory = mtlsContext?.socketFactory,
-                authority = authority
-            )
-            wifiClient = client
-
-            val nodeId = NodeIdProvider.getOrCreateNodeId(applicationContext)
-            val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
-            val thermalListener = AndroidDeviceThermalStatusListener(applicationContext).apply {
-                startListening()
-            }
-            val thermalGuard = ThermalSafetyGuard()
-
-            val initialBattery = batteryProvider.getBatteryStatus()
-            val initialThermal = thermalListener.currentThermalStatus
-
-            val capabilities = capabilityProvider.buildCapabilities(
-                currentTransport = NetworkTransportType.NETWORK_TRANSPORT_WIFI_LAN,
-                isMetered = false,
-                batteryTemperatureCelsius = initialBattery.temperatureCelsius,
-                thermalStatus = initialThermal
-            )
-
-            // Step 1: Register node per [REQ-OP-001] with exponential backoff retry loop
-            val regRequest = RegisterNodeRequest.newBuilder()
-                .setNodeId(nodeId)
-                .setCapabilities(capabilities)
-                .setClientVersion("0.1.0")
-                .build()
-
-            var sessionToken = ""
-            var retryDelayMs = SYNC_INTERVAL_MS
-            val maxRetryDelayMs = 60_000L
-
-            while (isActive && sessionToken.isEmpty()) {
-                val regResult = client.registerNode(regRequest)
-                if (regResult.isSuccess) {
-                    val token = regResult.getOrNull()?.sessionToken ?: ""
-                    if (token.isNotEmpty()) {
-                        sessionToken = token
-                        break
-                    }
-                }
-                delay(retryDelayMs)
-                retryDelayMs = (retryDelayMs * 2).coerceAtMost(maxRetryDelayMs)
-            }
-
-            if (!isActive || sessionToken.isEmpty()) {
-                thermalListener.stopListening()
-                return@launch
-            }
-
-            // Step 2: 2.0-second declarative synchronization loop per [REQ-OP-002]
-            while (isActive) {
-                val currentBattery = batteryProvider.getBatteryStatus()
-                val currentThermal = thermalListener.currentThermalStatus
-                val isThrottled = thermalGuard.isThermalThrottled(currentBattery.temperatureCelsius, currentThermal)
-
-                val reportsToSend = mutableListOf<TaskExecutionReport>()
-                while (completedReports.isNotEmpty()) {
-                    completedReports.poll()?.let { reportsToSend.add(it) }
+            settingsRepo.settingsFlow.collectLatest { settings ->
+                val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
+                if (mtlsContext == null) {
+                    updateNotification("Worker idle - Awaiting cluster enrollment / mTLS credentials")
+                    wifiClient?.shutdown(100L)
+                    wifiClient = null
+                    return@collectLatest
                 }
 
-                val syncRequest = SyncNodeStateRequest.newBuilder()
-                    .setNodeId(nodeId)
-                    .setSessionToken(sessionToken)
-                    .addAllCompletedTasks(reportsToSend)
-                    .build()
+                updateNotification("Participating in distributed cluster edge compute")
+                val authority = if (settings.wifiHost == "10.0.2.2" || settings.wifiHost == "127.0.0.1") "localhost" else null
+                val client = WifiSyncClient(
+                    host = settings.wifiHost,
+                    port = settings.wifiPort,
+                    sslSocketFactory = mtlsContext.socketFactory,
+                    authority = authority
+                )
+                wifiClient = client
 
-                val syncResult = client.syncNodeState(syncRequest)
-                if (syncResult.isSuccess && !isThrottled) {
-                    val response = syncResult.getOrNull()
-                    response?.desiredTasksList?.forEach { desiredTask ->
-                        // Dispatch assigned task concurrently in background
-                        launch {
-                            val result = dispatcher.dispatch(desiredTask)
-                            val report = result.toTaskExecutionReport(
-                                taskId = desiredTask.taskId,
-                                runAttempt = desiredTask.runAttempt,
-                                state = if (result.exitCode == 0) {
-                                    TaskState.TASK_STATE_COMPLETED
-                                } else {
-                                    TaskState.TASK_STATE_FAILED
-                                }
-                            )
-                            completedReports.add(report)
+                val nodeId = NodeIdProvider.getOrCreateNodeId(applicationContext)
+                val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
+                val thermalListener = AndroidDeviceThermalStatusListener(applicationContext).apply {
+                    startListening()
+                }
+                val thermalGuard = ThermalSafetyGuard()
+
+                try {
+                    val initialBattery = batteryProvider.getBatteryStatus()
+                    val initialThermal = thermalListener.currentThermalStatus
+
+                    val capabilities = capabilityProvider.buildCapabilities(
+                        currentTransport = NetworkTransportType.NETWORK_TRANSPORT_WIFI_LAN,
+                        isMetered = false,
+                        batteryTemperatureCelsius = initialBattery.temperatureCelsius,
+                        thermalStatus = initialThermal
+                    )
+
+                    // Step 1: Register node per [REQ-OP-001] with exponential backoff retry loop
+                    val regRequest = RegisterNodeRequest.newBuilder()
+                        .setNodeId(nodeId)
+                        .setCapabilities(capabilities)
+                        .setClientVersion("0.1.0")
+                        .build()
+
+                    var sessionToken = ""
+                    var retryDelayMs = SYNC_INTERVAL_MS
+                    val maxRetryDelayMs = 60_000L
+
+                    while (isActive && sessionToken.isEmpty()) {
+                        val regResult = client.registerNode(regRequest)
+                        if (regResult.isSuccess) {
+                            val token = regResult.getOrNull()?.sessionToken ?: ""
+                            if (token.isNotEmpty()) {
+                                sessionToken = token
+                                break
+                            }
                         }
+                        delay(retryDelayMs)
+                        retryDelayMs = (retryDelayMs * 2).coerceAtMost(maxRetryDelayMs)
                     }
-                }
 
-                delay(SYNC_INTERVAL_MS)
+                    if (!isActive || sessionToken.isEmpty()) {
+                        return@collectLatest
+                    }
+
+                    // Step 2: 2.0-second declarative synchronization loop per [REQ-OP-002]
+                    while (isActive) {
+                        val currentBattery = batteryProvider.getBatteryStatus()
+                        val currentThermal = thermalListener.currentThermalStatus
+                        val isThrottled = thermalGuard.isThermalThrottled(currentBattery.temperatureCelsius, currentThermal)
+
+                        val reportsToSend = mutableListOf<TaskExecutionReport>()
+                        while (completedReports.isNotEmpty()) {
+                            completedReports.poll()?.let { reportsToSend.add(it) }
+                        }
+
+                        val syncRequest = SyncNodeStateRequest.newBuilder()
+                            .setNodeId(nodeId)
+                            .setSessionToken(sessionToken)
+                            .addAllCompletedTasks(reportsToSend)
+                            .build()
+
+                        val syncResult = client.syncNodeState(syncRequest)
+                        if (syncResult.isSuccess && !isThrottled) {
+                            val response = syncResult.getOrNull()
+                            response?.desiredTasksList?.forEach { desiredTask ->
+                                // Dispatch assigned task concurrently in background
+                                launch {
+                                    val result = dispatcher.dispatch(desiredTask)
+                                    val report = result.toTaskExecutionReport(
+                                        taskId = desiredTask.taskId,
+                                        runAttempt = desiredTask.runAttempt,
+                                        state = if (result.exitCode == 0) {
+                                            TaskState.TASK_STATE_COMPLETED
+                                        } else {
+                                            TaskState.TASK_STATE_FAILED
+                                        }
+                                    )
+                                    completedReports.add(report)
+                                }
+                            }
+                        }
+
+                        delay(SYNC_INTERVAL_MS)
+                    }
+                } finally {
+                    thermalListener.stopListening()
+                    client.shutdown(100L)
+                }
             }
         }
+    }
+
+    private fun updateNotification(text: String) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("AndroGrid Worker")
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_stat_androgrid)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        manager.notify(NOTIFICATION_ID, notification)
     }
 
     private fun stopSyncLoop() {

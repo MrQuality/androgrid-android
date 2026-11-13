@@ -75,12 +75,17 @@ class WifiSyncClient(
 ) {
     private val channel: ManagedChannel by lazy {
         channelProvider?.invoke(host, port) ?: run {
+            val socketFactory = checkNotNull(sslSocketFactory) {
+                "Mutual TLS SSLSocketFactory must be configured for WifiSyncClient per [INV-002]"
+            }
             val builder = OkHttpChannelBuilder.forAddress(host, port)
                 .useTransportSecurity()
+                .sslSocketFactory(socketFactory)
+                .tlsConnectionSpec(
+                    MtlsContext.TLS_13_VERSIONS,
+                    MtlsContext.TLS_13_CIPHERS
+                )
                 .maxInboundMessageSize(ContractConstants.MAX_FRAME_SIZE_BYTES.toInt())
-            if (sslSocketFactory != null) {
-                builder.sslSocketFactory(sslSocketFactory)
-            }
             if (authority != null) {
                 builder.overrideAuthority(authority)
             }

@@ -99,4 +99,16 @@ class MtlsSocketFactoryProviderTest {
         val context = provider.buildSocketFactory(settings)
         assertThat(context).isNull()
     }
+
+    @Test
+    fun testMtlsTls13SocketFactory_enforcesStrictTls13() {
+        val context = provider.createMtlsContextFromPem(
+            caCertPem = TestCertificateFixtures.CA_CERT_PEM,
+            clientCertPem = TestCertificateFixtures.CLIENT_CERT_PEM,
+            clientKeyPem = TestCertificateFixtures.clientPrivateKeyPem
+        )
+        val socket = context.socketFactory.createSocket() as javax.net.ssl.SSLSocket
+        assertThat(socket.enabledProtocols.toList()).containsExactly("TLSv1.3")
+        assertThat(socket.enabledProtocols.toList()).doesNotContain("TLSv1.2")
+    }
 }

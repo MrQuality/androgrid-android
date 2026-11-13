@@ -162,4 +162,17 @@ class WifiSyncClientTest {
         )
         assertThat(client).isNotNull()
     }
+
+    @Test
+    fun testWifiSyncClient_rejectsChannelCreationWithoutSslSocketFactory() = runTest {
+        val client = WifiSyncClient(
+            host = "10.0.0.1",
+            port = 50051
+        )
+        val request = RegisterNodeRequest.newBuilder().setNodeId("worker-1").build()
+        val result = client.registerNode(request)
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(IllegalStateException::class.java)
+        assertThat(result.exceptionOrNull()?.message).contains("Mutual TLS SSLSocketFactory must be configured")
+    }
 }

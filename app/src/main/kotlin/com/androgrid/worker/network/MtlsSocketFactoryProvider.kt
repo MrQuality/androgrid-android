@@ -1,5 +1,6 @@
 package com.androgrid.worker.network
 
+import com.androgrid.worker.enrollment.KeyEnrollmentUtils
 import java.io.ByteArrayInputStream
 import java.net.InetAddress
 import java.net.Socket
@@ -26,7 +27,28 @@ import javax.net.ssl.X509TrustManager
 data class MtlsContext(
     val socketFactory: SSLSocketFactory,
     val trustManager: X509TrustManager
-)
+) {
+    companion object {
+        val TLS_13_VERSIONS = arrayOf("TLSv1.3")
+        val TLS_13_CIPHERS = arrayOf(
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_CHACHA20_POLY1305_SHA256"
+        )
+
+        /**
+         * Creates an SSLContext with graceful fallback from TLSv1.3 to TLS on legacy platforms
+         * such as stock Android 9 (API 28, our minSdk) where TLSv1.3 is not an algorithm identifier.
+         */
+        fun createSslContext(): SSLContext {
+            return try {
+                SSLContext.getInstance("TLSv1.3")
+            } catch (_: Exception) {
+                SSLContext.getInstance("TLS")
+            }
+        }
+    }
+}
 
 /**
  * Parsed certificate metadata for operator dashboard inspection and validation.
@@ -120,31 +142,7 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         val clientChain = clientCerts.toTypedArray()
 
         // 3. Parse Client Private Key (PKCS#8 DER)
-        val cleanKey = clientKeyPem
-            .replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "")
-            .replace("-----BEGIN EC PRIVATE KEY-----", "")
-            .replace("-----END EC PRIVATE KEY-----", "")
-            .replace("-----BEGIN RSA PRIVATE KEY-----", "")
-            .replace("-----END RSA PRIVATE KEY-----", "")
-            .replace("\\s".toRegex(), "")
-
-        val keyBytes = try {
-            Base64.getDecoder().decode(cleanKey)
-        } catch (e: Exception) {
-            throw IllegalArgumentException("Client private key PEM contains invalid base64 data", e)
-        }
-
-        val keySpec = PKCS8EncodedKeySpec(keyBytes)
-        val privateKey = try {
-            KeyFactory.getInstance("EC").generatePrivate(keySpec)
-        } catch (_: Exception) {
-            try {
-                KeyFactory.getInstance("RSA").generatePrivate(keySpec)
-            } catch (e2: Exception) {
-                throw IllegalArgumentException("Client private key is neither valid EC nor RSA PKCS#8 key", e2)
-            }
-        }
+        val privateKey = KeyEnrollmentUtils.parsePrivateKey(clientKeyPem)
 
         // 4. Build Client Identity KeyStore
         val clientStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
@@ -162,12 +160,9 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
             ?: throw IllegalStateException("No X509TrustManager found in TrustManagerFactory")
 
-        val sslContext = try {
-            SSLContext.getInstance("TLSv1.3")
-        } catch (_: Exception) {
-            SSLContext.getInstance("TLS")
+        val sslContext = MtlsContext.createSslContext().apply {
+            init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
         }
-        sslContext.init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
 
         return MtlsContext(
             socketFactory = MtlsTls13SocketFactory(sslContext.socketFactory),
@@ -211,12 +206,9 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
         val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
             ?: throw IllegalStateException("No X509TrustManager found in TrustManagerFactory")
 
-        val sslContext = try {
-            SSLContext.getInstance("TLSv1.3")
-        } catch (_: Exception) {
-            SSLContext.getInstance("TLS")
+        val sslContext = MtlsContext.createSslContext().apply {
+            init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
         }
-        sslContext.init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
 
         return MtlsContext(
             socketFactory = MtlsTls13SocketFactory(sslContext.socketFactory),
