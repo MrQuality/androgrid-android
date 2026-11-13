@@ -9,6 +9,7 @@ import org.bouncycastle.pkcs.PKCS10CertificationRequest
 import org.junit.Before
 import org.junit.Test
 import java.io.StringReader
+import java.security.KeyStore
 import java.security.interfaces.ECPublicKey
 
 /**
@@ -97,5 +98,48 @@ class KeyEnrollmentProviderTest {
         val mtlsContext = provider.createMtlsContext(testAlias, certPem)
         assertThat(mtlsContext.socketFactory).isNotNull()
         assertThat(mtlsContext.trustManager).isNotNull()
+    }
+
+    @Test
+    fun androidKeyStoreEnrollmentProvider_createMtlsContext_throwsWhenAliasMissing() {
+        val inMemoryKeyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
+        val aksProvider = AndroidKeyStoreEnrollmentProvider(inMemoryKeyStore)
+
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            aksProvider.createMtlsContext("non_existent_alias", TestCertificateFixtures.CA_CERT_PEM)
+        }
+    }
+
+    @Test
+    fun androidKeyStoreEnrollmentProvider_buildAliasKeyManager_filtersKeyTypeAndAlias() {
+        val inMemoryKeyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
+        val aksProvider = AndroidKeyStoreEnrollmentProvider(inMemoryKeyStore)
+
+        // Enroll test key and certificate into the in-memory keystore
+        val keyPair = provider.generateKeyPair(testAlias)
+        val certPem = provider.createSelfSignedCertPemForTesting(testAlias, testNodeId)
+        val certChain = KeyEnrollmentUtils.parseCertificateChain(certPem).toTypedArray()
+
+        inMemoryKeyStore.setKeyEntry(testAlias, keyPair.private, null, certChain)
+
+        val km = aksProvider.buildAliasKeyManager(testAlias)
+
+        // Matching keyType or empty/null matches EC
+        assertThat(km.chooseClientAlias(null, null, null)).isEqualTo(testAlias)
+        assertThat(km.chooseClientAlias(emptyArray(), null, null)).isEqualTo(testAlias)
+        assertThat(km.chooseClientAlias(arrayOf("EC", "RSA"), null, null)).isEqualTo(testAlias)
+        assertThat(km.chooseEngineClientAlias(arrayOf("EC"), null, null)).isEqualTo(testAlias)
+
+        // Incompatible keyType returns null
+        assertThat(km.chooseClientAlias(arrayOf("RSA"), null, null)).isNull()
+        assertThat(km.chooseEngineClientAlias(arrayOf("RSA"), null, null)).isNull()
+        assertThat(km.getClientAliases("RSA", null)).isNull()
+        assertThat(km.getClientAliases("EC", null)).asList().containsExactly(testAlias)
+
+        // Alias matching for key/chain retrieval
+        assertThat(km.getPrivateKey(testAlias)).isEqualTo(keyPair.private)
+        assertThat(km.getPrivateKey("other_alias")).isNull()
+        assertThat(km.getCertificateChain(testAlias)).hasLength(certChain.size)
+        assertThat(km.getCertificateChain("other_alias")).isNull()
     }
 }
