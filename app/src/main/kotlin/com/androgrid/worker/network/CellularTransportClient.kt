@@ -103,7 +103,11 @@ class CellularTransportClient(
      * @return Result containing response or caught exception.
      */
     suspend fun claimTask(request: ClaimCellularTaskRequest): Result<ClaimCellularTaskResponse> {
-        val channel = createChannel()
+        val channel = try {
+            createChannel()
+        } catch (e: Throwable) {
+            return Result.failure(e)
+        }
         return claimTaskWithChannel(channel, request)
     }
 
@@ -135,7 +139,11 @@ class CellularTransportClient(
      * @return Result containing response or caught exception.
      */
     suspend fun submitResult(request: SubmitCellularResultRequest): Result<SubmitCellularResultResponse> {
-        val channel = createChannel()
+        val channel = try {
+            createChannel()
+        } catch (e: Throwable) {
+            return Result.failure(e)
+        }
         return submitResultWithChannel(channel, request)
     }
 

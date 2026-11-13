@@ -171,8 +171,9 @@ class CellularSpotWorker(
     override suspend fun doWork(): Result {
         val settingsRepo = SharedPreferencesClusterSettingsRepository.getInstance(applicationContext)
         val settings = settingsRepo.getSettings()
-        if (!settings.hasMtlsCredentials) {
-            // Unenrolled: refuse unauthenticated network execution per [INV-002]
+        val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
+        if (mtlsContext == null) {
+            // Unenrolled or invalid credentials: refuse unauthenticated network execution per [INV-002]
             return Result.success()
         }
         return logic.executeSpotTask()

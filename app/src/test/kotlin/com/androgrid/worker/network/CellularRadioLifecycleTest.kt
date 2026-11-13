@@ -186,4 +186,29 @@ class CellularRadioLifecycleTest {
         )
         assertThat(client).isNotNull()
     }
+
+    @Test
+    fun testCellularTransportClient_rejectsChannelCreationWithoutSslSocketFactory() {
+        val client = CellularTransportClient(
+            ingressHost = "grpc.cloudflare.net",
+            ingressPort = 443
+        )
+        val exception = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            client.createChannel()
+        }
+        assertThat(exception.message).contains("Mutual TLS SSLSocketFactory must be configured")
+    }
+
+    @Test
+    fun testCellularTransportClient_claimTaskReturnsFailureGracefullyWithoutSslSocketFactory() = runTest {
+        val client = CellularTransportClient(
+            ingressHost = "grpc.cloudflare.net",
+            ingressPort = 443
+        )
+        val request = ClaimCellularTaskRequest.newBuilder().setNodeId("node_01").build()
+        val result = client.claimTask(request)
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(IllegalStateException::class.java)
+        assertThat(result.exceptionOrNull()?.message).contains("Mutual TLS SSLSocketFactory must be configured")
+    }
 }
