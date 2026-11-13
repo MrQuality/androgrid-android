@@ -61,27 +61,32 @@ We implement an `Application`-scoped, persistent, and lifecycle-safe **Task Exec
 
 ### 1. `Application`-Scoped Lifecycle Container (`AndroGridApplication`)
 An `AndroGridApplication` class (registered in `AndroidManifest.xml`) hosts an application-scoped container with a `SupervisorJob` coroutine scope:
-- Owns long-lived `NetworkRouteMonitor`, `AndroidDeviceThermalStatusListener`, `WorkerLifecycleCoordinator`, `isComputeActive: StateFlow<Boolean>`, and `TaskLedgerRepository`.
+- **Lazy Initialization & Zero Main-Thread Disk I/O:** Container components initialize via `by lazy`; `Application.onCreate()` performs zero disk I/O and starts zero listeners (avoiding StrictMode `DiskReadViolation` on cold start and Robolectric tests).
+- **Demand-Gated Monitors (`[NFR-POW-001]`):** Owns `NetworkRouteMonitor` and `AndroidDeviceThermalStatusListener`, gated so listeners run ONLY while `isComputeActive.value == true` OR at least one Activity is in the `STARTED` state (ref-counted via `onStart`/`onStop`). When idle in the background, monitors are stopped to preserve battery.
+- **Unified Participation Controller:** Owns `WorkerLifecycleCoordinator` and `isComputeActive: StateFlow<Boolean>`. Both `MainActivity` (via `WorkerDashboardViewModel`) and `TestAutomationReceiver` delegate to this single `Application`-scoped controller so ADB automation intents and UI button clicks share the exact same state.
 - `MainActivity.onDestroy()` does NOT stop monitors or cancel `WorkerLifecycleCoordinator`.
-- `WorkerDashboardViewModel` delegates `startParticipation()` / `stopParticipation()` to the application controller and observes `isComputeActive`, surviving Activity rotation and back-navigation.
 
 ### 2. Durable, Serialized `TaskLedgerRepository` (Single Source of Truth)
 We define `TaskLedgerRepository` and `SharedPreferencesTaskLedgerRepository` mirroring `SharedPreferencesClusterSettingsRepository`:
+- **Async Off-Main-Thread Hydration:** Initializes `MutableStateFlow(TaskLedgerSnapshot.EMPTY)` immediately on the Main Thread without reading `SharedPreferences`, then hydrates asynchronously via `ioDispatcher` under its `Mutex`.
 - **Synchronization & Durability:** `suspend fun recordTaskExecution(...)` acquires a `kotlinx.coroutines.sync.Mutex` inside `withContext(ioDispatcher)` (default `Dispatchers.IO`) and persists via synchronous `editor.commit()` rather than `apply()`. This guarantees serialized writes and prevents silent data loss if Android LMK or `stopSelf()` kills the process before `QueuedWork` flushes.
 - **Versioned Serialization & Fault Recovery:** Serializes state as versioned `org.json` (`"version": 1`). Deserialization is wrapped in `try / catch (JSONException)` with schema-version validation; corrupt or incompatible payloads reset cleanly to an empty `TaskLedgerSnapshot` and overwrite on the next commit.
-- **Separated UI Ring Buffer & Bounded Dedup Window (`[INV-004]`):**
+- **Separated UI Ring Buffer & Deterministic FIFO Dedup Window (`[INV-004]`):**
   - **UI Recent-Tasks Ring Buffer:** Bounded to the last **20** `TaskLedgerEntry` items.
-  - **Deduplication FIFO Window:** Bounded to the last **512** `"$taskId:$runAttempt"` keys (~20-30 KB in XML). Separating these bounds prevents late retries from double-counting after task #21 evicts task #1 from the UI list, while preventing unbounded `SharedPreferences` growth.
+  - **Deduplication FIFO Window:** Backed by an insertion-ordered `LinkedHashSet<String>` serialized as a `JSONArray` in oldest-to-newest order, bounded to **512** `"$taskId:$runAttempt"` keys (~20-30 KB in XML). At capacity, `iterator().next()` is evicted deterministically before insertion.
+  - **Dedup Query Method:** Exposes `suspend fun isRecorded(taskId: String, runAttempt: Int): Boolean` (acquiring the `Mutex` and awaiting initial hydration) so callers check the full 512-key index safely.
 
 ### 3. Dual-Route Execution Semantics & Data Hygiene
 - **Unified Success Predicate:** Both `WorkerForegroundService` and `CellularSpotWorker` standardize on `result.isSuccess` (`exitCode == 0 && errorCode.isEmpty()`).
-- **In-Flight Guard in `WorkerForegroundService`:** Tracks active `(taskId, runAttempt)` keys in `ConcurrentHashMap.newKeySet()`, removing in a `finally` block and skipping tasks already in-flight or already recorded in `TaskLedgerRepository` so tasks exceeding 2.0s are never re-dispatched redundantly (`[NFR-POW-001]`).
-- **Cellular Submission Outcomes (`CellularSpotWorker`):** Records to `TaskLedgerRepository` **after** `SubmitCellularResult` resolves:
+- **In-Flight & Cancellation Guard in `WorkerForegroundService`:**
+  - Tracks active `(taskId, runAttempt)` keys in `ConcurrentHashMap.newKeySet()`, removing in a `finally` block and skipping tasks already in-flight or already recorded via `ledgerRepository.isRecorded(...)` so tasks exceeding 2.0s are never re-dispatched redundantly (`[NFR-POW-001]`).
+  - Explicitly `catch (e: CancellationException) { throw e }` around task dispatch so stopping sync (`ACTION_STOP_SYNC` or `collectLatest`) never maps cancellation to `FAILED`. Only wraps `ledgerRepository.recordTaskExecution(...)` in `withContext(NonCancellable)` after `dispatcher.dispatch()` returns a genuine terminal result.
+- **Cellular Submission Outcomes (`CellularSpotWorker`):** Records to `TaskLedgerRepository` **after** `SubmitCellularResult` resolves (since WorkManager retries re-invoke `claimTask()` rather than re-submitting cached results):
   - `COMPLETED`: `result.isSuccess` and `SubmitCellularResult` succeeded. Increments `tasksCompletedCount`.
   - `FAILED`: `!result.isSuccess`. Increments `tasksFailedCount`.
-  - `STALE`: `result.isSuccess` locally, but orchestrator rejected with `TASK_ATTEMPT_STALE`. Recorded in the recent ledger as `STALE` for operator visibility and **does NOT increment `tasksCompletedCount`** (preventing split-brain telemetry).
-  - Transient network error returning `Result.retry()`: Not recorded yet; WorkManager retries.
-- **Strict Data Hygiene (`[NFR-SEC-001]`):** `TaskLedgerEntry` contains strictly `taskId`, `runAttempt`, `route` (`"WIFI_LAN"` / `"CELLULAR_WAN"`), `status` (`COMPLETED`, `FAILED`, `STALE`), `exitCode`, `errorCode`, `executionDurationMs`, and `completedAtEpochMs`. Raw `stdout` and `stderr` are **strictly excluded** from `SharedPreferences`.
+  - `STALE`: `result.isSuccess` locally, but orchestrator rejected with `TASK_ATTEMPT_STALE`. Recorded in the recent ledger as `STALE` and **does NOT increment `tasksCompletedCount`**.
+  - `SUBMISSION_FAILED`: `result.isSuccess` locally, but `SubmitCellularResult` failed with a transient network error before returning `Result.retry()`. Recorded in the recent ledger as `SUBMISSION_FAILED` so the executed task is not silently lost, and **does NOT increment `tasksCompletedCount` or `tasksFailedCount`**.
+- **Strict Data Hygiene (`[NFR-SEC-001]`):** `TaskLedgerEntry` contains strictly `taskId`, `runAttempt`, `route` (`"WIFI_LAN"` / `"CELLULAR_WAN"`), `status` (`COMPLETED`, `FAILED`, `STALE`, `SUBMISSION_FAILED`), `exitCode`, `errorCode`, `executionDurationMs`, and `completedAtEpochMs`. Raw `stdout` and `stderr` are **strictly excluded** from `SharedPreferences`.
 
 ### 4. ViewModel Concurrency & Lifecycle-Safe Activity Collection
 - `WorkerDashboardViewModel` replaces all `_uiState.value = _uiState.value.copy(...)` mutations with CAS-based `_uiState.update { it.copy(...) }`.
