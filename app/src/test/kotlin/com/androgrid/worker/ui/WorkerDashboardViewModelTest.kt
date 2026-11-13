@@ -196,18 +196,25 @@ class WorkerDashboardViewModelTest {
     @Test
     fun testTaskCounterIncrement_updatesCompletedCount() = runTest {
         val routeFlow = MutableStateFlow<NetworkRoute>(NetworkRoute.Offline)
+        val ledger = InMemoryTaskLedgerRepository()
         val viewModel = WorkerDashboardViewModel(
             nodeId = "node_test",
             routeFlow = routeFlow,
             capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
             batteryProvider = FakeBatteryProvider(),
-            coordinator = WorkerLifecycleCoordinator(routeFlow, RecordingServiceController(), RecordingWorkScheduler())
+            coordinator = WorkerLifecycleCoordinator(routeFlow, RecordingServiceController(), RecordingWorkScheduler()),
+            ledgerRepository = ledger
         )
 
         assertThat(viewModel.uiState.value.tasksCompletedCount).isEqualTo(0)
 
-        viewModel.incrementCompletedTasks()
-        viewModel.incrementCompletedTasks()
+        ledger.recordTaskExecution(
+            TaskLedgerEntry("t1", 1, "WIFI_LAN", TaskLedgerStatus.COMPLETED, 0, "", 10L, 100L)
+        )
+        ledger.recordTaskExecution(
+            TaskLedgerEntry("t2", 1, "CELLULAR_WAN", TaskLedgerStatus.COMPLETED, 0, "", 15L, 200L)
+        )
+        testScheduler.advanceUntilIdle()
 
         assertThat(viewModel.uiState.value.tasksCompletedCount).isEqualTo(2)
     }

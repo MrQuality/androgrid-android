@@ -163,11 +163,4 @@ class WorkerDashboardViewModel(
             coordinator.handleRouteTransition(NetworkRoute.Offline)
         }
     }
-
-    /**
-     * Increments the cumulative completed tasks counter.
-     */
-    fun incrementCompletedTasks() {
-        _uiState.update { it.copy(tasksCompletedCount = it.tasksCompletedCount + 1) }
-    }
 }
