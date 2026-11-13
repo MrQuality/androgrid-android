@@ -10,7 +10,11 @@ import com.androgrid.worker.network.NetworkRoute
 import com.androgrid.worker.service.ServiceController
 import com.androgrid.worker.service.WorkScheduler
 import com.androgrid.worker.service.WorkerLifecycleCoordinator
+import com.androgrid.worker.service.WorkerParticipationController
 import com.androgrid.worker.telemetry.DeviceThermalStatusListener
+import com.androgrid.worker.telemetry.InMemoryTaskLedgerRepository
+import com.androgrid.worker.telemetry.TaskLedgerEntry
+import com.androgrid.worker.telemetry.TaskLedgerStatus
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -268,5 +272,109 @@ class WorkerDashboardViewModelTest {
 
         assertThat(viewModel.uiState.value.thermalStatus).isEqualTo(3)
         assertThat(viewModel.uiState.value.thermalBadgeColorHex()).isEqualTo("#C62828")
+    }
+
+    @Test
+    fun testLedgerSnapshotUpdates_reflectCompletedFailedAndRecentEntriesWithoutClobberingRoute() = runTest {
+        val routeFlow = MutableStateFlow<NetworkRoute>(NetworkRoute.Offline)
+        val thermalListener = FakeThermalListener(currentThermalStatus = 0)
+        val ledger = InMemoryTaskLedgerRepository()
+
+        val viewModel = WorkerDashboardViewModel(
+            nodeId = "node_test_pixel",
+            routeFlow = routeFlow,
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            batteryProvider = FakeBatteryProvider(),
+            coordinator = WorkerLifecycleCoordinator(routeFlow, RecordingServiceController(), RecordingWorkScheduler()),
+            thermalStatusListener = thermalListener,
+            ledgerRepository = ledger
+        )
+
+        routeFlow.value = NetworkRoute.LanConnected(isMetered = false)
+        ledger.recordTaskExecution(
+            TaskLedgerEntry(
+                taskId = "task-vm-1",
+                runAttempt = 1,
+                route = "WIFI_LAN",
+                status = TaskLedgerStatus.COMPLETED,
+                exitCode = 0,
+                errorCode = "",
+                executionDurationMs = 25L,
+                completedAtEpochMs = 1000L
+            )
+        )
+        ledger.recordTaskExecution(
+            TaskLedgerEntry(
+                taskId = "task-vm-2",
+                runAttempt = 1,
+                route = "CELLULAR_WAN",
+                status = TaskLedgerStatus.FAILED,
+                exitCode = 1,
+                errorCode = "ERR_TRAP",
+                executionDurationMs = 10L,
+                completedAtEpochMs = 2000L
+            )
+        )
+        testScheduler.advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertThat(state.route).isEqualTo(NetworkRoute.LanConnected(isMetered = false))
+        assertThat(state.tasksCompletedCount).isEqualTo(1)
+        assertThat(state.tasksFailedCount).isEqualTo(1)
+        assertThat(state.recentEntries).hasSize(2)
+        assertThat(state.recentEntries.first().taskId).isEqualTo("task-vm-2")
+    }
+
+    @Test
+    fun testParticipationControllerDelegation_sharesActiveStateAcrossViewModels() = runTest {
+        val routeFlow = MutableStateFlow<NetworkRoute>(NetworkRoute.LanConnected(isMetered = false))
+        val serviceController = RecordingServiceController()
+        val workScheduler = RecordingWorkScheduler()
+        val coordinator = WorkerLifecycleCoordinator(routeFlow, serviceController, workScheduler)
+        val controller = object : WorkerParticipationController {
+            private val _active = MutableStateFlow(false)
+            override val isComputeActive: StateFlow<Boolean> = _active
+            override fun startParticipation() {
+                _active.value = true
+                serviceController.startWifiSyncService()
+            }
+            override fun stopParticipation() {
+                _active.value = false
+                serviceController.stopWifiSyncService()
+            }
+            override fun syncActiveFromServiceStart() {}
+            override fun onUiStarted() {}
+            override fun onUiStopped() {}
+        }
+
+        val vm1 = WorkerDashboardViewModel(
+            nodeId = "node_test_pixel",
+            routeFlow = routeFlow,
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            batteryProvider = FakeBatteryProvider(),
+            coordinator = coordinator,
+            participationController = controller
+        )
+
+        vm1.startParticipation()
+        testScheduler.advanceUntilIdle()
+        assertThat(vm1.uiState.value.isComputeActive).isTrue()
+        assertThat(serviceController.started.get()).isTrue()
+
+        // Second ViewModel (simulating Activity recreation) observes the same active state
+        val vm2 = WorkerDashboardViewModel(
+            nodeId = "node_test_pixel",
+            routeFlow = routeFlow,
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            batteryProvider = FakeBatteryProvider(),
+            coordinator = coordinator,
+            participationController = controller
+        )
+        assertThat(vm2.uiState.value.isComputeActive).isTrue()
+
+        vm2.stopParticipation()
+        testScheduler.advanceUntilIdle()
+        assertThat(vm1.uiState.value.isComputeActive).isFalse()
+        assertThat(vm2.uiState.value.isComputeActive).isFalse()
     }
 }
