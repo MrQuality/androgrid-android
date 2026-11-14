@@ -80,7 +80,11 @@ class AndroGridApplication : Application() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+        // Exclude TRIM_MEMORY_UI_HIDDEN (20) so backgrounding the UI does not evict active worker cache
+        val isMemoryPressure =
+            level in ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE
+        if (isMemoryPressure) {
             artifactMemoryCache.clear()
         }
     }

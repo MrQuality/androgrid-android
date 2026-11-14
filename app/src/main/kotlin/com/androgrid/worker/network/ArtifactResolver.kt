@@ -92,6 +92,7 @@ class ArtifactResolver(
      */
     suspend fun resolve(
         task: TaskSpec,
+        nodeId: String,
         fetchRpc: suspend (FetchArtifactRequest) -> FetchArtifactResponse
     ): ArtifactResolution {
         if (task.engine != ExecutionEngine.EXECUTION_ENGINE_WASM_WASI || !task.wasmBytecode.isEmpty) {
@@ -116,6 +117,7 @@ class ArtifactResolver(
             fetchRpc(
                 FetchArtifactRequest.newBuilder()
                     .setArtifactSha256(expectedSha)
+                    .setNodeId(nodeId)
                     .build()
             )
         } catch (e: Throwable) {
@@ -131,7 +133,7 @@ class ArtifactResolver(
             )
         }
 
-        val computedSha = computeSha256Hex(bytes.toByteArray())
+        val computedSha = computeSha256Hex(bytes)
         if (computedSha != expectedSha) {
             return ArtifactResolution.TerminalFailure(
                 errorCode = "PAYLOAD_CORRUPT",
@@ -165,6 +167,14 @@ class ArtifactResolver(
                 errorCode = "PAYLOAD_TOO_LARGE",
                 errorMessage = detail
             )
+            Status.Code.UNIMPLEMENTED -> ArtifactResolution.TerminalFailure(
+                errorCode = "RPC_UNIMPLEMENTED",
+                errorMessage = detail
+            )
+            Status.Code.PERMISSION_DENIED, Status.Code.UNAUTHENTICATED -> ArtifactResolution.TerminalFailure(
+                errorCode = "AUTH_REJECTED",
+                errorMessage = detail
+            )
             else -> ArtifactResolution.TransientError(e)
         }
     }
@@ -173,8 +183,9 @@ class ArtifactResolver(
         return value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
     }
 
-    private fun computeSha256Hex(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
+    private fun computeSha256Hex(bytes: ByteString): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(bytes.asReadOnlyByteBuffer())
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 }

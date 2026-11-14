@@ -45,9 +45,7 @@ interface CellularRpcInvoker {
     suspend fun invokeFetchArtifact(
         channel: ManagedChannel,
         request: FetchArtifactRequest
-    ): FetchArtifactResponse {
-        throw UnsupportedOperationException("invokeFetchArtifact is not implemented")
-    }
+    ): FetchArtifactResponse
 }
 
 /**
@@ -201,7 +199,7 @@ class CellularTransportClient(
             }
             val claimedTask = claimResponse.task
             when (
-                val resolution = artifactResolver.resolve(claimedTask) { fetchReq ->
+                val resolution = artifactResolver.resolve(claimedTask, request.nodeId) { fetchReq ->
                     rpcInvoker.invokeFetchArtifact(channel, fetchReq)
                 }
             ) {

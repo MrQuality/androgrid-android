@@ -43,9 +43,7 @@ interface WifiRpcInvoker {
     suspend fun invokeFetchArtifact(
         channel: ManagedChannel,
         request: FetchArtifactRequest
-    ): FetchArtifactResponse {
-        throw UnsupportedOperationException("invokeFetchArtifact is not implemented")
-    }
+    ): FetchArtifactResponse
 }
 
 /**

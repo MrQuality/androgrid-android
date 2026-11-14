@@ -318,6 +318,7 @@ message EnrollWorkerResponse {
 // Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
 message FetchArtifactRequest {
   string artifact_sha256 = 1;
+  string node_id = 2;
 }
 
 // Response containing the verified WebAssembly bytecode for a requested SHA-256 digest.
