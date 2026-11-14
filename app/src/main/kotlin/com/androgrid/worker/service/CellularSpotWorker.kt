@@ -19,6 +19,8 @@ import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.capability.NodeIdProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.engine.TaskExecutionDispatcher
+import com.androgrid.worker.network.ArtifactResolver
+import com.androgrid.worker.network.CellularClaimOutcome
 import com.androgrid.worker.network.CellularTransportClient
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
@@ -89,25 +91,49 @@ class CellularSpotWorkerLogic(
             .setThermalStatus(thermalStatus)
             .build()
 
-        // Step 4: Unary task claim over ephemeral channel (channel closes immediately)
-        val claimResult = if (channelProvider != null) {
+        // Step 4: Unary task claim + artifact resolution over single ephemeral channel (channel closes immediately)
+        val claimOutcome = if (channelProvider != null) {
             val channel = channelProvider.invoke()
-            cellularClient.claimTaskWithChannel(channel, claimRequest)
+            cellularClient.claimAndResolveTaskWithChannel(channel, claimRequest)
         } else {
-            cellularClient.claimTask(claimRequest)
+            cellularClient.claimAndResolveTask(claimRequest)
         }
 
-        if (claimResult.isFailure) {
-            return androidx.work.ListenableWorker.Result.retry()
-        }
-
-        val claimResponse = claimResult.getOrNull()
-        if (claimResponse == null || !claimResponse.taskAvailable) {
-            return androidx.work.ListenableWorker.Result.success()
+        val task = when (claimOutcome) {
+            is CellularClaimOutcome.NoTask -> {
+                return androidx.work.ListenableWorker.Result.success()
+            }
+            is CellularClaimOutcome.TransientFailure -> {
+                return androidx.work.ListenableWorker.Result.retry()
+            }
+            is CellularClaimOutcome.TerminalArtifactFailure -> {
+                if (!claimOutcome.submissionSucceeded) {
+                    // Reporting the terminal failure back to the orchestrator failed (e.g. radio drop);
+                    // retry via WorkManager instead of leaving the orchestrator lease stranded.
+                    return androidx.work.ListenableWorker.Result.retry()
+                }
+                // Terminal failure reported to orchestrator on the same channel before teardown;
+                // record locally and complete WorkManager cycle without retrying.
+                withContext(NonCancellable) {
+                    ledgerRepository?.recordTaskExecution(
+                        TaskLedgerEntry(
+                            taskId = claimOutcome.task.taskId,
+                            runAttempt = claimOutcome.task.runAttempt,
+                            route = "CELLULAR_WAN",
+                            status = TaskLedgerStatus.FAILED,
+                            exitCode = -1,
+                            errorCode = claimOutcome.errorCode,
+                            executionDurationMs = 0L,
+                            completedAtEpochMs = System.currentTimeMillis()
+                        )
+                    )
+                }
+                return androidx.work.ListenableWorker.Result.success()
+            }
+            is CellularClaimOutcome.TaskReady -> claimOutcome.task
         }
 
         // Step 5: Offline compute execution via sandboxed dispatcher
-        val task = claimResponse.task
         val executionResult = dispatcher.dispatch(task)
 
         // Step 6: Atomic result submission over new ephemeral channel
@@ -183,13 +209,15 @@ class CellularSpotWorker(
         val settingsRepo = SharedPreferencesClusterSettingsRepository.getInstance(appContext)
         val settings = settingsRepo.getSettings()
         val mtlsContext = DefaultMtlsSocketFactoryProvider.buildSocketFactory(settings)
+        val app = appContext.applicationContext as? AndroGridApplication
         val cellularClient = CellularTransportClient(
             ingressHost = settings.cellularHost,
             ingressPort = settings.cellularPort,
-            sslSocketFactory = mtlsContext?.socketFactory
+            sslSocketFactory = mtlsContext?.socketFactory,
+            artifactResolver = app?.artifactResolver ?: ArtifactResolver()
         )
 
-        val ledgerRepository = (appContext.applicationContext as? AndroGridApplication)?.taskLedgerRepository
+        val ledgerRepository = app?.taskLedgerRepository
             ?: SharedPreferencesTaskLedgerRepository.getInstance(appContext)
 
         CellularSpotWorkerLogic(

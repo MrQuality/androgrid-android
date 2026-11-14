@@ -13,6 +13,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.androgrid.worker.AndroGridApplication
 import com.androgrid.worker.R
+import com.androgrid.v1.FetchArtifactRequest
+import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.NetworkTransportType
 import com.androgrid.v1.RegisterNodeRequest
 import com.androgrid.v1.SyncNodeStateRequest
@@ -24,6 +26,8 @@ import com.androgrid.worker.capability.DeviceCapabilityProvider
 import com.androgrid.worker.capability.NodeIdProvider
 import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.engine.TaskExecutionDispatcher
+import com.androgrid.worker.network.ArtifactResolution
+import com.androgrid.worker.network.ArtifactResolver
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.network.WifiSyncClient
@@ -230,6 +234,8 @@ class WorkerForegroundService : Service() {
                             .build()
 
                         val ledgerRepository = resolveLedgerRepository()
+                        val artifactResolver = (application as? AndroGridApplication)?.artifactResolver
+                            ?: ArtifactResolver()
                         val syncResult = client.syncNodeState(syncRequest)
                         if (syncResult.isSuccess && !isThrottled) {
                             val response = syncResult.getOrNull()
@@ -237,7 +243,10 @@ class WorkerForegroundService : Service() {
                                 dispatcher = dispatcher,
                                 ledgerRepository = ledgerRepository,
                                 inFlightTasks = inFlightTasks,
-                                completedReports = completedReports
+                                completedReports = completedReports,
+                                artifactResolver = artifactResolver,
+                                nodeId = nodeId,
+                                fetchArtifactRpc = { req -> client.fetchArtifact(req) }
                             )
                             response?.desiredTasksList?.forEach { desiredTask ->
                                 taskProcessor.launchTaskIfEligible(this, desiredTask)
@@ -306,11 +315,16 @@ internal class WifiSyncTaskProcessor(
     private val dispatcher: TaskExecutionDispatcher,
     private val ledgerRepository: TaskLedgerRepository,
     private val inFlightTasks: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet(),
-    private val completedReports: ConcurrentLinkedQueue<TaskExecutionReport> = ConcurrentLinkedQueue()
+    private val completedReports: ConcurrentLinkedQueue<TaskExecutionReport> = ConcurrentLinkedQueue(),
+    private val artifactResolver: ArtifactResolver = ArtifactResolver(),
+    private val nodeId: String = "",
+    private val fetchArtifactRpc: (suspend (FetchArtifactRequest) -> FetchArtifactResponse)? = null
 ) {
     /**
      * Checks ledger/in-flight eligibility for [desiredTask] and, if eligible, launches execution
-     * in [scope]. Returns the launched [Job], or `null` if skipped as duplicate/recorded.
+     * in [scope]. Resolves content-addressed artifacts over the persistent gRPC channel before
+     * invoking [TaskExecutionDispatcher] ([INV-002], [INV-003]). Returns the launched [Job], or
+     * `null` if skipped as duplicate/recorded.
      */
     suspend fun launchTaskIfEligible(
         scope: CoroutineScope,
@@ -325,11 +339,52 @@ internal class WifiSyncTaskProcessor(
         }
         return scope.launch {
             try {
-                val result = dispatcher.dispatch(desiredTask)
+                val resolvedTask = when (
+                    val resolution = artifactResolver.resolve(desiredTask, nodeId) { req ->
+                        val rpc = fetchArtifactRpc
+                            ?: throw IllegalStateException("FetchArtifact RPC not configured")
+                        rpc.invoke(req)
+                    }
+                ) {
+                    is ArtifactResolution.Ready -> resolution.task
+                    is ArtifactResolution.TerminalFailure -> {
+                        val failedReport = TaskExecutionReport.newBuilder()
+                            .setTaskId(desiredTask.taskId)
+                            .setRunAttempt(desiredTask.runAttempt)
+                            .setState(TaskState.TASK_STATE_FAILED)
+                            .setExitCode(-1)
+                            .setErrorCode(resolution.errorCode)
+                            .setStderrBytes(com.google.protobuf.ByteString.copyFromUtf8(resolution.errorMessage))
+                            .setExecutionTimeMs(0L)
+                            .build()
+                        completedReports.add(failedReport)
+                        withContext(NonCancellable) {
+                            ledgerRepository.recordTaskExecution(
+                                TaskLedgerEntry(
+                                    taskId = desiredTask.taskId,
+                                    runAttempt = desiredTask.runAttempt,
+                                    route = "WIFI_LAN",
+                                    status = TaskLedgerStatus.FAILED,
+                                    exitCode = -1,
+                                    errorCode = resolution.errorCode,
+                                    executionDurationMs = 0L,
+                                    completedAtEpochMs = System.currentTimeMillis()
+                                )
+                            )
+                        }
+                        return@launch
+                    }
+                    is ArtifactResolution.TransientError -> {
+                        // Do not record in ledger; release inFlightTasks in finally so the next sync tick retries.
+                        return@launch
+                    }
+                }
+
+                val result = dispatcher.dispatch(resolvedTask)
                 val isSuccess = result.isSuccess
                 val report = result.toTaskExecutionReport(
-                    taskId = desiredTask.taskId,
-                    runAttempt = desiredTask.runAttempt,
+                    taskId = resolvedTask.taskId,
+                    runAttempt = resolvedTask.runAttempt,
                     state = if (isSuccess) {
                         TaskState.TASK_STATE_COMPLETED
                     } else {
