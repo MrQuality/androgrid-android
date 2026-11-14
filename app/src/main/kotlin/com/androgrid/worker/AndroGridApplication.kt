@@ -1,8 +1,11 @@
 package com.androgrid.worker
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.net.ConnectivityManager
+import com.androgrid.worker.network.ArtifactMemoryCache
+import com.androgrid.worker.network.ArtifactResolver
 import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.NetworkRouteMonitor
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
@@ -65,5 +68,20 @@ class AndroGridApplication : Application() {
             coordinator = lifecycleCoordinator,
             appScope = appScope
         )
+    }
+
+    val artifactMemoryCache: ArtifactMemoryCache by lazy {
+        ArtifactMemoryCache()
+    }
+
+    val artifactResolver: ArtifactResolver by lazy {
+        ArtifactResolver(artifactMemoryCache)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            artifactMemoryCache.clear()
+        }
     }
 }
