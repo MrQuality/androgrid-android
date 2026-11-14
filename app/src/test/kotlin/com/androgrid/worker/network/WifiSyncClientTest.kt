@@ -75,6 +75,13 @@ class WifiSyncClientTest {
             channel: ManagedChannel,
             request: SyncNodeStateRequest
         ): SyncNodeStateResponse = syncResult.getOrThrow()
+
+        override suspend fun invokeFetchArtifact(
+            channel: ManagedChannel,
+            request: com.androgrid.v1.FetchArtifactRequest
+        ): com.androgrid.v1.FetchArtifactResponse {
+            return com.androgrid.v1.FetchArtifactResponse.getDefaultInstance()
+        }
     }
 
     @Test
