@@ -191,4 +191,64 @@ class WorkerForegroundServiceTest {
         assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(0)
         assertThat(ledger.isRecorded("wifi_cancel", 1)).isFalse()
     }
+
+    @Test
+    fun testWifiSyncTaskProcessor_externalArtifactResolution_andTerminalNotFoundReport() = runTest {
+        val ledger = InMemoryTaskLedgerRepository()
+        val reports = ConcurrentLinkedQueue<TaskExecutionReport>()
+        val payload = byteArrayOf(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00)
+        val okSha = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(payload)
+            .joinToString("") { "%02x".format(it) }
+        val missingSha = "b".repeat(64)
+
+        val executedTasks = mutableListOf<TaskSpec>()
+        val engine = object : ComputeEngine {
+            override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+                executedTasks.add(task)
+                return TaskExecutionResult.success("ok".toByteArray(), 5L)
+            }
+        }
+        val processor = WifiSyncTaskProcessor(
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            ledgerRepository = ledger,
+            completedReports = reports,
+            fetchArtifactRpc = { req ->
+                if (req.artifactSha256 == okSha) {
+                    com.androgrid.v1.FetchArtifactResponse.newBuilder()
+                        .setWasmBytecode(ByteString.copyFrom(payload))
+                        .build()
+                } else {
+                    throw io.grpc.StatusRuntimeException(
+                        io.grpc.Status.NOT_FOUND.withDescription("not found")
+                    )
+                }
+            }
+        )
+
+        val okTask = TaskSpec.newBuilder()
+            .setTaskId("wifi_ext_ok")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setArtifactSha256(okSha)
+            .build()
+        val missingTask = TaskSpec.newBuilder()
+            .setTaskId("wifi_ext_missing")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setArtifactSha256(missingSha)
+            .build()
+
+        processor.launchTaskIfEligible(this, okTask)?.join()
+        processor.launchTaskIfEligible(this, missingTask)?.join()
+
+        assertThat(executedTasks).hasSize(1)
+        assertThat(executedTasks.single().wasmBytecode.toByteArray()).isEqualTo(payload)
+        assertThat(reports).hasSize(2)
+        val missingReport = reports.first { it.taskId == "wifi_ext_missing" }
+        assertThat(missingReport.state).isEqualTo(TaskState.TASK_STATE_FAILED)
+        assertThat(missingReport.errorCode).isEqualTo("ARTIFACT_NOT_FOUND")
+        assertThat(ledger.ledgerSnapshot.value.tasksCompletedCount).isEqualTo(1)
+        assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(1)
+    }
 }

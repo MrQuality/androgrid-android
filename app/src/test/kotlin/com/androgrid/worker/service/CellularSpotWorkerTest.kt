@@ -91,23 +91,39 @@ class CellularSpotWorkerTest {
         var claimResponse: Result<ClaimCellularTaskResponse>,
         var submitResponse: Result<SubmitCellularResultResponse> = Result.success(
             SubmitCellularResultResponse.newBuilder().setAccepted(true).build()
+        ),
+        var fetchResponse: Result<com.androgrid.v1.FetchArtifactResponse> = Result.failure(
+            StatusRuntimeException(Status.NOT_FOUND)
         )
     ) : CellularRpcInvoker {
         var lastClaimRequest: ClaimCellularTaskRequest? = null
         var lastSubmitRequest: SubmitCellularResultRequest? = null
+        var lastClaimChannel: ManagedChannel? = null
+        var lastFetchChannel: ManagedChannel? = null
+        var lastSubmitChannel: ManagedChannel? = null
 
         override suspend fun invokeClaim(
             channel: ManagedChannel,
             request: ClaimCellularTaskRequest
         ): ClaimCellularTaskResponse {
+            lastClaimChannel = channel
             lastClaimRequest = request
             return claimResponse.getOrThrow()
+        }
+
+        override suspend fun invokeFetchArtifact(
+            channel: ManagedChannel,
+            request: com.androgrid.v1.FetchArtifactRequest
+        ): com.androgrid.v1.FetchArtifactResponse {
+            lastFetchChannel = channel
+            return fetchResponse.getOrThrow()
         }
 
         override suspend fun invokeSubmit(
             channel: ManagedChannel,
             request: SubmitCellularResultRequest
         ): SubmitCellularResultResponse {
+            lastSubmitChannel = channel
             lastSubmitRequest = request
             return submitResponse.getOrThrow()
         }
@@ -546,5 +562,97 @@ class CellularSpotWorkerTest {
         val snap = ledger.ledgerSnapshot.value
         assertThat(snap.tasksCompletedCount).isEqualTo(1)
         assertThat(snap.recentEntries.first().status).isEqualTo(TaskLedgerStatus.COMPLETED)
+    }
+
+    @Test
+    fun testCellularSpotWorker_externalArtifactSuccess_fetchesOnSameChannelAndExecutes() = runTest {
+        val ledger = InMemoryTaskLedgerRepository()
+        val payload = byteArrayOf(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00)
+        val sha = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(payload)
+            .joinToString("") { "%02x".format(it) }
+
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_ext_ok")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setArtifactSha256(sha)
+            .build()
+
+        val channels = mutableListOf<MockChannel>()
+        val engine = EchoEngine()
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            ),
+            fetchResponse = Result.success(
+                com.androgrid.v1.FetchArtifactResponse.newBuilder()
+                    .setWasmBytecode(ByteString.copyFrom(payload))
+                    .build()
+            )
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            channelProvider = { MockChannel().also { channels.add(it) } },
+            ledgerRepository = ledger
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        assertThat(rpc.lastClaimChannel).isSameInstanceAs(rpc.lastFetchChannel)
+        assertThat(channels).hasSize(2)
+        assertThat(channels.all { it.shutdownCalled.get() }).isTrue()
+        assertThat(engine.executedTask?.wasmBytecode?.toByteArray()).isEqualTo(payload)
+        assertThat(ledger.ledgerSnapshot.value.tasksCompletedCount).isEqualTo(1)
+    }
+
+    @Test
+    fun testCellularSpotWorker_externalArtifactNotFound_submitsTerminalFailureOnSameChannelAndDoesNotRetry() = runTest {
+        val ledger = InMemoryTaskLedgerRepository()
+        val sha = "a".repeat(64)
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_ext_missing")
+            .setRunAttempt(2)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setArtifactSha256(sha)
+            .build()
+
+        val channels = mutableListOf<MockChannel>()
+        val engine = EchoEngine()
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            ),
+            fetchResponse = Result.failure(
+                StatusRuntimeException(Status.NOT_FOUND.withDescription("artifact missing"))
+            )
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            channelProvider = { MockChannel().also { channels.add(it) } },
+            ledgerRepository = ledger
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.success())
+        assertThat(engine.executedTask).isNull()
+        assertThat(channels).hasSize(1)
+        assertThat(channels.single().shutdownCalled.get()).isTrue()
+        assertThat(rpc.lastClaimChannel).isSameInstanceAs(rpc.lastFetchChannel)
+        assertThat(rpc.lastSubmitChannel).isSameInstanceAs(rpc.lastFetchChannel)
+        assertThat(rpc.lastSubmitRequest?.errorCode).isEqualTo("ARTIFACT_NOT_FOUND")
+        assertThat(rpc.lastSubmitRequest?.exitCode).isEqualTo(-1)
+        assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(1)
+        assertThat(ledger.ledgerSnapshot.value.recentEntries.first().errorCode).isEqualTo("ARTIFACT_NOT_FOUND")
     }
 }

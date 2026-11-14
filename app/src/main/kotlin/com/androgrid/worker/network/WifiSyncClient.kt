@@ -1,6 +1,8 @@
 package com.androgrid.worker.network
 
 import com.androgrid.v1.AndroGridServiceGrpcKt
+import com.androgrid.v1.FetchArtifactRequest
+import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.RegisterNodeRequest
 import com.androgrid.v1.RegisterNodeResponse
 import com.androgrid.v1.SyncNodeStateRequest
@@ -34,6 +36,16 @@ interface WifiRpcInvoker {
         channel: ManagedChannel,
         request: SyncNodeStateRequest
     ): SyncNodeStateResponse
+
+    /**
+     * Executes FetchArtifact RPC over the persistent Wi-Fi channel.
+     */
+    suspend fun invokeFetchArtifact(
+        channel: ManagedChannel,
+        request: FetchArtifactRequest
+    ): FetchArtifactResponse {
+        throw UnsupportedOperationException("invokeFetchArtifact is not implemented")
+    }
 }
 
 /**
@@ -56,6 +68,14 @@ class DefaultWifiRpcInvoker : WifiRpcInvoker {
     ): SyncNodeStateResponse {
         val stub = AndroGridServiceGrpcKt.AndroGridServiceCoroutineStub(channel)
         return stub.syncNodeState(request)
+    }
+
+    override suspend fun invokeFetchArtifact(
+        channel: ManagedChannel,
+        request: FetchArtifactRequest
+    ): FetchArtifactResponse {
+        val stub = AndroGridServiceGrpcKt.AndroGridServiceCoroutineStub(channel)
+        return stub.fetchArtifact(request)
     }
 }
 
@@ -119,6 +139,15 @@ class WifiSyncClient(
         } catch (e: Throwable) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * Fetches a content-addressed WASM artifact over the persistent mTLS Wi-Fi channel.
+     *
+     * Traces to: [INV-002], [NFR-PERF-001], [REQ-OP-003]
+     */
+    suspend fun fetchArtifact(request: FetchArtifactRequest): FetchArtifactResponse {
+        return rpcInvoker.invokeFetchArtifact(channel, request)
     }
 
     /**
