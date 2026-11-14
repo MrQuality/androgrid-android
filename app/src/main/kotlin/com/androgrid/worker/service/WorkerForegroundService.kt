@@ -245,6 +245,7 @@ class WorkerForegroundService : Service() {
                                 inFlightTasks = inFlightTasks,
                                 completedReports = completedReports,
                                 artifactResolver = artifactResolver,
+                                nodeId = nodeId,
                                 fetchArtifactRpc = { req -> client.fetchArtifact(req) }
                             )
                             response?.desiredTasksList?.forEach { desiredTask ->
@@ -316,6 +317,7 @@ internal class WifiSyncTaskProcessor(
     private val inFlightTasks: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet(),
     private val completedReports: ConcurrentLinkedQueue<TaskExecutionReport> = ConcurrentLinkedQueue(),
     private val artifactResolver: ArtifactResolver = ArtifactResolver(),
+    private val nodeId: String = "",
     private val fetchArtifactRpc: (suspend (FetchArtifactRequest) -> FetchArtifactResponse)? = null
 ) {
     /**
@@ -338,7 +340,7 @@ internal class WifiSyncTaskProcessor(
         return scope.launch {
             try {
                 val resolvedTask = when (
-                    val resolution = artifactResolver.resolve(desiredTask) { req ->
+                    val resolution = artifactResolver.resolve(desiredTask, nodeId) { req ->
                         val rpc = fetchArtifactRpc
                             ?: throw IllegalStateException("FetchArtifact RPC not configured")
                         rpc.invoke(req)

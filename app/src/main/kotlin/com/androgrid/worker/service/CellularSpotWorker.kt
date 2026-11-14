@@ -107,7 +107,12 @@ class CellularSpotWorkerLogic(
                 return androidx.work.ListenableWorker.Result.retry()
             }
             is CellularClaimOutcome.TerminalArtifactFailure -> {
-                // Terminal failure already reported to orchestrator on the same channel before teardown;
+                if (!claimOutcome.submissionSucceeded) {
+                    // Reporting the terminal failure back to the orchestrator failed (e.g. radio drop);
+                    // retry via WorkManager instead of leaving the orchestrator lease stranded.
+                    return androidx.work.ListenableWorker.Result.retry()
+                }
+                // Terminal failure reported to orchestrator on the same channel before teardown;
                 // record locally and complete WorkManager cycle without retrying.
                 withContext(NonCancellable) {
                     ledgerRepository?.recordTaskExecution(
