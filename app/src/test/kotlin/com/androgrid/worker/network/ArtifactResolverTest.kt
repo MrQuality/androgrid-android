@@ -1,7 +1,6 @@
 package com.androgrid.worker.network
 
 import com.androgrid.v1.ExecutionEngine
-import com.androgrid.v1.FetchArtifactRequest
 import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.TaskSpec
 import com.androgrid.worker.contract.ContractConstants
@@ -21,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class ArtifactResolverTest {
 
+    private val testNodeId = "pixel8-worker-01"
+
     private fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return digest.joinToString("") { "%02x".format(it) }
@@ -37,7 +38,7 @@ class ArtifactResolverTest {
             .setWasmBytecode(ByteString.copyFrom(byteArrayOf(0x00, 0x61, 0x73, 0x6d)))
             .build()
 
-        val result = resolver.resolve(task) {
+        val result = resolver.resolve(task, testNodeId) {
             rpcCalls.incrementAndGet()
             FetchArtifactResponse.getDefaultInstance()
         }
@@ -62,9 +63,10 @@ class ArtifactResolverTest {
             .setArtifactSha256(sha)
             .build()
 
-        val first = resolver.resolve(task) { req ->
+        val first = resolver.resolve(task, testNodeId) { req ->
             rpcCalls.incrementAndGet()
             assertThat(req.artifactSha256).isEqualTo(sha)
+            assertThat(req.nodeId).isEqualTo(testNodeId)
             FetchArtifactResponse.newBuilder()
                 .setWasmBytecode(ByteString.copyFrom(payload))
                 .build()
@@ -75,7 +77,7 @@ class ArtifactResolverTest {
         assertThat(rpcCalls.get()).isEqualTo(1)
         assertThat(cache.currentBytes()).isEqualTo(payload.size)
 
-        val second = resolver.resolve(task) {
+        val second = resolver.resolve(task, testNodeId) {
             rpcCalls.incrementAndGet()
             FetchArtifactResponse.getDefaultInstance()
         }
@@ -94,7 +96,7 @@ class ArtifactResolverTest {
             .setArtifactSha256("not-a-sha")
             .build()
 
-        val result = resolver.resolve(task) {
+        val result = resolver.resolve(task, testNodeId) {
             throw AssertionError("RPC should not be called for malformed SHA-256")
         }
 
@@ -113,7 +115,7 @@ class ArtifactResolverTest {
             .setArtifactSha256(expectedSha)
             .build()
 
-        val result = resolver.resolve(task) {
+        val result = resolver.resolve(task, testNodeId) {
             FetchArtifactResponse.newBuilder()
                 .setWasmBytecode(ByteString.copyFromUtf8("tampered"))
                 .build()
@@ -134,7 +136,7 @@ class ArtifactResolverTest {
             .setArtifactSha256(sha256Hex(oversized))
             .build()
 
-        val result = resolver.resolve(task) {
+        val result = resolver.resolve(task, testNodeId) {
             FetchArtifactResponse.newBuilder()
                 .setWasmBytecode(ByteString.copyFrom(oversized))
                 .build()
@@ -154,19 +156,31 @@ class ArtifactResolverTest {
             .setArtifactSha256(sha)
             .build()
 
-        val notFound = resolver.resolve(task) {
+        val notFound = resolver.resolve(task, testNodeId) {
             throw StatusRuntimeException(Status.NOT_FOUND.withDescription("missing"))
         }
         assertThat(notFound).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
         assertThat((notFound as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("ARTIFACT_NOT_FOUND")
 
-        val resourceExhausted = resolver.resolve(task) {
+        val resourceExhausted = resolver.resolve(task, testNodeId) {
             throw StatusRuntimeException(Status.RESOURCE_EXHAUSTED.withDescription("too large"))
         }
         assertThat(resourceExhausted).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
         assertThat((resourceExhausted as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("PAYLOAD_TOO_LARGE")
 
-        val unavailable = resolver.resolve(task) {
+        val unimplemented = resolver.resolve(task, testNodeId) {
+            throw StatusRuntimeException(Status.UNIMPLEMENTED.withDescription("old server"))
+        }
+        assertThat(unimplemented).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
+        assertThat((unimplemented as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("RPC_UNIMPLEMENTED")
+
+        val permissionDenied = resolver.resolve(task, testNodeId) {
+            throw StatusRuntimeException(Status.PERMISSION_DENIED.withDescription("cn mismatch"))
+        }
+        assertThat(permissionDenied).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
+        assertThat((permissionDenied as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("AUTH_REJECTED")
+
+        val unavailable = resolver.resolve(task, testNodeId) {
             throw StatusRuntimeException(Status.UNAVAILABLE.withDescription("transient"))
         }
         assertThat(unavailable).isInstanceOf(ArtifactResolution.TransientError::class.java)

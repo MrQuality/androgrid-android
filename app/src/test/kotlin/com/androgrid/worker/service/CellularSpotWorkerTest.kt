@@ -241,6 +241,7 @@ class CellularSpotWorkerTest {
             .setTaskId("task_stale")
             .setRunAttempt(1)
             .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom("wasm-payload".toByteArray()))
             .build()
 
         val rpc = FakeCellularRpc(
@@ -257,7 +258,8 @@ class CellularSpotWorkerTest {
         val batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 90, isCharging = true))
         val client = CellularTransportClient(rpcInvoker = rpc)
         val capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo())
-        val dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine())
+        val echoEngine = EchoEngine()
+        val dispatcher = TaskExecutionDispatcher(wasmEngine = echoEngine)
 
         val workerLogic = CellularSpotWorkerLogic(
             nodeId = "test_node_01",
@@ -270,7 +272,8 @@ class CellularSpotWorkerTest {
 
         val result = workerLogic.executeSpotTask()
 
-        // Worker handles stale attempt gracefully by returning success to complete the WorkManager job
+        // Worker executes task, handles stale attempt gracefully, and completes WorkManager job
+        assertThat(echoEngine.executedTask?.taskId).isEqualTo("task_stale")
         assertThat(result).isEqualTo(ListenableWorker.Result.success())
     }
 
@@ -654,5 +657,44 @@ class CellularSpotWorkerTest {
         assertThat(rpc.lastSubmitRequest?.exitCode).isEqualTo(-1)
         assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(1)
         assertThat(ledger.ledgerSnapshot.value.recentEntries.first().errorCode).isEqualTo("ARTIFACT_NOT_FOUND")
+    }
+
+    @Test
+    fun testCellularSpotWorker_externalArtifactNotFound_whenSubmitFails_returnsRetryWithoutRecordingTerminalFailure() = runTest {
+        val ledger = InMemoryTaskLedgerRepository()
+        val sha = "c".repeat(64)
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_cell_ext_submit_drop")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setArtifactSha256(sha)
+            .build()
+
+        val rpc = FakeCellularRpc(
+            claimResponse = Result.success(
+                ClaimCellularTaskResponse.newBuilder().setTaskAvailable(true).setTask(task).build()
+            ),
+            fetchResponse = Result.failure(
+                StatusRuntimeException(Status.NOT_FOUND.withDescription("artifact missing"))
+            ),
+            submitResponse = Result.failure(
+                StatusRuntimeException(Status.UNAVAILABLE.withDescription("radio dropped"))
+            )
+        )
+        val workerLogic = CellularSpotWorkerLogic(
+            nodeId = "test_node_01",
+            batteryProvider = FakeBatteryProvider(BatteryStatus(levelPercent = 80, isCharging = false)),
+            capabilityProvider = DeviceCapabilityProvider(FakeRootChecker(), FakeSystemInfo()),
+            cellularClient = CellularTransportClient(rpcInvoker = rpc),
+            dispatcher = TaskExecutionDispatcher(wasmEngine = EchoEngine()),
+            channelProvider = { MockChannel() },
+            ledgerRepository = ledger
+        )
+
+        val result = workerLogic.executeSpotTask()
+
+        assertThat(result).isEqualTo(ListenableWorker.Result.retry())
+        assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(0)
+        assertThat(ledger.isRecorded("task_cell_ext_submit_drop", 1)).isFalse()
     }
 }
