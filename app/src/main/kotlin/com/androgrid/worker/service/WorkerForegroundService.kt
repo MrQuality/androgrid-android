@@ -317,7 +317,7 @@ internal class WifiSyncTaskProcessor(
     private val inFlightTasks: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet(),
     private val completedReports: ConcurrentLinkedQueue<TaskExecutionReport> = ConcurrentLinkedQueue(),
     private val artifactResolver: ArtifactResolver = ArtifactResolver(),
-    private val nodeId: String = "",
+    private val nodeId: String,
     private val fetchArtifactRpc: (suspend (FetchArtifactRequest) -> FetchArtifactResponse)? = null
 ) {
     /**

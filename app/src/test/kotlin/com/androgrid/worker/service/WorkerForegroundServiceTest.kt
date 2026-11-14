@@ -68,7 +68,8 @@ class WorkerForegroundServiceTest {
         val processor = WifiSyncTaskProcessor(
             dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
             ledgerRepository = ledger,
-            completedReports = reports
+            completedReports = reports,
+            nodeId = "wifi-test-node"
         )
 
         val okTask = TaskSpec.newBuilder()
@@ -121,7 +122,8 @@ class WorkerForegroundServiceTest {
         val processor = WifiSyncTaskProcessor(
             dispatcher = TaskExecutionDispatcher(wasmEngine = slowEngine),
             ledgerRepository = ledger,
-            inFlightTasks = inFlight
+            inFlightTasks = inFlight,
+            nodeId = "wifi-test-node"
         )
 
         val task = TaskSpec.newBuilder()
@@ -174,7 +176,8 @@ class WorkerForegroundServiceTest {
         val processor = WifiSyncTaskProcessor(
             dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
             ledgerRepository = ledger,
-            inFlightTasks = inFlight
+            inFlightTasks = inFlight,
+            nodeId = "wifi-test-node"
         )
         val task = TaskSpec.newBuilder()
             .setTaskId("wifi_cancel")
@@ -213,6 +216,7 @@ class WorkerForegroundServiceTest {
             dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
             ledgerRepository = ledger,
             completedReports = reports,
+            nodeId = "wifi-test-node",
             fetchArtifactRpc = { req ->
                 if (req.artifactSha256 == okSha) {
                     com.androgrid.v1.FetchArtifactResponse.newBuilder()
