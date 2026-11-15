@@ -46,7 +46,7 @@ The distributed mobile edge compute worker for **AndroGrid**: executing isolated
 ### Building the Application
 ```bash
 # Clone the repository
-git clone https://github.com/MrQuality/androgrid-android.git
+git clone https://github.com/ligature-platform/androgrid-android.git
 cd androgrid-android
 
 # Assemble debug APK
