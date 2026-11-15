@@ -40,7 +40,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <a href="{base_path}worker-guide.html">Onboarding Guide</a>
                 <a href="{base_path}architecture.html">Architecture</a>
                 <a href="{base_path}dokka/index.html">Dokka KDoc API</a>
-                <a href="https://mrquality.github.io/androgrid-backend/" target="_blank" class="nav-ext">Central Portal &nearr;</a>
+                <a href="https://ligature-platform.github.io/androgrid-backend/" target="_blank" class="nav-ext">Central Portal &nearr;</a>
             </nav>
         </div>
     </header>
@@ -377,7 +377,7 @@ LANDING_BODY = """
         </p>
         <span class="card-cta">Browse Kotlin KDoc API &rarr;</span>
     </a>
-    <a href="https://mrquality.github.io/androgrid-backend/" target="_blank" class="card">
+    <a href="https://ligature-platform.github.io/androgrid-backend/" target="_blank" class="card">
         <h3 class="card-title">Central Cluster Portal</h3>
         <p class="card-desc">
             Access the master AndroGrid documentation hub for host orchestrator deployment, operator CLI reference, Cloudflare Anycast ingress, and Protobuf contracts.
