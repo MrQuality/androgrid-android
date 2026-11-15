@@ -64,5 +64,67 @@ jobs:
           fi
           echo "R8 mapping contracts verified successfully: reflection preserved, dead code tree-shaken."
 
+      - name: Assemble Release APK & Verify 16 KB Native Alignment
+        run: |
+          ./gradlew validateSigningDebug --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          python3 - <<'PY'
+          import os, struct, sys, zipfile
+
+          apk_path = "app/build/outputs/apk/release/app-release.apk"
+          if not os.path.isfile(apk_path):
+              print(f"ERROR: Release APK not found at {apk_path}", file=sys.stderr)
+              sys.exit(1)
+
+          checked = 0
+          errors = []
+          with open(apk_path, "rb") as raw, zipfile.ZipFile(apk_path, "r") as zf:
+              for info in zf.infolist():
+                  if not (info.filename.startswith("lib/arm64-v8a/") or info.filename.startswith("lib/x86_64/")):
+                      continue
+                  if not info.filename.endswith(".so"):
+                      continue
+                  checked += 1
+
+                  if info.compress_type != zipfile.ZIP_STORED:
+                      errors.append(f"{info.filename}: compress_type={info.compress_type}, expected ZIP_STORED (0)")
+
+                  raw.seek(info.header_offset)
+                  lh = raw.read(30)
+                  sig, _, _, _, _, _, _, _, _, fname_len, extra_len = struct.unpack("<IHHHHHIIIHH", lh)
+                  if sig != 0x04034B50:
+                      errors.append(f"{info.filename}: invalid local file header signature {sig:#x}")
+                  data_offset = info.header_offset + 30 + fname_len + extra_len
+                  if data_offset % 16384 != 0:
+                      errors.append(f"{info.filename}: zip data_offset={data_offset} is not 16 KB aligned (mod 16384 = {data_offset % 16384})")
+
+                  elf = zf.read(info.filename)
+                  if elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+                      errors.append(f"{info.filename}: unexpected ELF header (expected 64-bit little-endian ELF)")
+                      continue
+                  e_phoff = struct.unpack_from("<Q", elf, 32)[0]
+                  e_phentsize, e_phnum = struct.unpack_from("<HH", elf, 54)
+                  pt_loads = []
+                  for i in range(e_phnum):
+                      off = e_phoff + i * e_phentsize
+                      p_type = struct.unpack_from("<I", elf, off)[0]
+                      if p_type == 1:  # PT_LOAD
+                          p_align = struct.unpack_from("<Q", elf, off + 48)[0]
+                          pt_loads.append(p_align)
+                  if not pt_loads or any(a < 0x4000 for a in pt_loads):
+                      errors.append(f"{info.filename}: PT_LOAD p_align={[hex(a) for a in pt_loads]} (expected >= 0x4000)")
+                  else:
+                      print(f"OK: {info.filename} (stored, offset%16384=0, PT_LOAD={[hex(a) for a in pt_loads]})")
+
+          if checked == 0:
+              errors.append("No 64-bit .so files found in lib/arm64-v8a/ or lib/x86_64/")
+
+          if errors:
+              for err in errors:
+                  print(f"ERROR: {err}", file=sys.stderr)
+              sys.exit(1)
+          print(f"Verified 16 KB ELF and APK zip alignment for {checked} 64-bit native libraries.")
+          PY
+
       - name: Generate Dokka KDoc API Documentation
         run: ./gradlew dokkaHtml --no-daemon --stacktrace
