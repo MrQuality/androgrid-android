@@ -66,6 +66,7 @@ jobs:
 
       - name: Assemble Release APK & Verify 16 KB Native Alignment
         run: |
+          ./gradlew validateSigningDebug --no-daemon --stacktrace
           ./gradlew assembleRelease --no-daemon --stacktrace
           python3 - <<'PY'
           import os, struct, sys, zipfile
