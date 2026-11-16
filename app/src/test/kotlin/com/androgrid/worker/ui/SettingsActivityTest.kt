@@ -200,6 +200,32 @@ class SettingsActivityTest {
         controller.destroy()
     }
 
+    @Test
+    fun testSettingsActivity_handleP12Import_dialogCancelUpdatesBanner() {
+        val repo = InMemoryClusterSettingsRepository()
+        val controller = Robolectric.buildActivity(SettingsActivity::class.java)
+        val activity = controller.get()
+        activity.repository = repo
+        activity.ioDispatcher = Dispatchers.Main.immediate
+
+        controller.create().start().resume()
+
+        val protectedFile = createTestP12File(activity.cacheDir, "secret".toCharArray())
+        runBlocking { activity.handleP12Import(android.net.Uri.fromFile(protectedFile)).join() }
+        ShadowLooper.idleMainLooper()
+
+        val dialog = ShadowAlertDialog.getLatestAlertDialog() as? AlertDialog
+        assertThat(dialog).isNotNull()
+        dialog!!.cancel()
+        ShadowLooper.idleMainLooper()
+
+        assertThat(activity.p12StatusBanner.visibility).isEqualTo(android.view.View.VISIBLE)
+        assertThat(activity.p12StatusBanner.text.toString()).contains("cancelled")
+
+        protectedFile.delete()
+        controller.destroy()
+    }
+
     private fun createTestP12File(dir: java.io.File, password: CharArray): java.io.File {
         val kpg = java.security.KeyPairGenerator.getInstance("EC").apply {
             initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
