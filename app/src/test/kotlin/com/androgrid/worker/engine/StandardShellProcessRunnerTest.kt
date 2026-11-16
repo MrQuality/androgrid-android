@@ -8,6 +8,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Unit tests verifying [StandardShellProcessRunner] cooperative cancellation and
@@ -19,7 +20,10 @@ class StandardShellProcessRunnerTest {
 
     @Test
     fun runProcess_coroutineCancelled_terminatesChildProcessAndRethrowsCancellation(): Unit = runBlocking {
-        val runner = StandardShellProcessRunner()
+        val spawnedProcess = AtomicReference<Process?>(null)
+        val runner = StandardShellProcessRunner(
+            onProcessStarted = { process -> spawnedProcess.set(process) }
+        )
         val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
         val command = if (isWindows) {
             listOf("powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 30")
@@ -41,7 +45,10 @@ class StandardShellProcessRunnerTest {
             }
         }
 
-        delay(100)
+        delay(150)
+        val process = spawnedProcess.get()
+        assertThat(process).isNotNull()
+
         val cancelStartMs = System.currentTimeMillis()
         job.cancel()
         withTimeout(3000L) {
@@ -52,5 +59,6 @@ class StandardShellProcessRunnerTest {
         assertThat(job.isCancelled).isTrue()
         assertThat(caughtCancellation).isTrue()
         assertThat(elapsedMs).isLessThan(2000L)
+        assertThat(process!!.isAlive).isFalse()
     }
 }

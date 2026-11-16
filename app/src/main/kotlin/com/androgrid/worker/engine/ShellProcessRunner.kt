@@ -66,7 +66,8 @@ interface ShellProcessRunner {
  * Traces to: [INV-006], [NFR-PERF-001]
  */
 class StandardShellProcessRunner(
-    private val maxStreamSizeBytes: Int = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt()
+    private val maxStreamSizeBytes: Int = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt(),
+    private val onProcessStarted: ((Process) -> Unit)? = null
 ) : ShellProcessRunner {
 
     override suspend fun runProcess(
@@ -79,12 +80,17 @@ class StandardShellProcessRunner(
         environment.forEach { (k, v) -> env[k] = v }
 
         val process = processBuilder.start()
+        onProcessStarted?.invoke(process)
 
         val stdoutStream = ByteArrayOutputStream()
         val stderrStream = ByteArrayOutputStream()
 
-        val stdoutDrainer = Thread { drainStream(process.inputStream, stdoutStream) }
-        val stderrDrainer = Thread { drainStream(process.errorStream, stderrStream) }
+        val stdoutDrainer = Thread { drainStream(process.inputStream, stdoutStream) }.apply {
+            isDaemon = true
+        }
+        val stderrDrainer = Thread { drainStream(process.errorStream, stderrStream) }.apply {
+            isDaemon = true
+        }
 
         stdoutDrainer.start()
         stderrDrainer.start()
@@ -114,11 +120,18 @@ class StandardShellProcessRunner(
                 stderrBytes = stderrStream.toByteArray()
             )
         } finally {
-            if (process.isAlive) {
-                process.destroyForcibly()
+            val wasInterrupted = Thread.interrupted()
+            try {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                }
+                runCatching { stdoutDrainer.join(200) }
+                runCatching { stderrDrainer.join(200) }
+            } finally {
+                if (wasInterrupted) {
+                    Thread.currentThread().interrupt()
+                }
             }
-            stdoutDrainer.join(200)
-            stderrDrainer.join(200)
         }
     }
 
