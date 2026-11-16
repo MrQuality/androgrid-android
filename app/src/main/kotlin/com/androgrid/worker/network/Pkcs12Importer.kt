@@ -58,7 +58,7 @@ object Pkcs12Importer {
      * @param primaryLoader Testable primary KeyStore loader (defaults to platform `"PKCS12"`).
      * @return [Pkcs12ImportResult] describing extracted credentials, password prompt need, or error.
      */
-    internal fun import(
+    internal fun importWithLoader(
         bytes: ByteArray,
         password: CharArray = charArrayOf(),
         primaryLoader: (ByteArray, CharArray) -> KeyStore = ::loadPlatformPkcs12
@@ -92,7 +92,7 @@ object Pkcs12Importer {
      * @return [Pkcs12ImportResult] describing extracted credentials, password prompt need, or error.
      */
     fun import(bytes: ByteArray, password: CharArray = charArrayOf()): Pkcs12ImportResult {
-        return import(bytes, password, ::loadPlatformPkcs12)
+        return importWithLoader(bytes, password, ::loadPlatformPkcs12)
     }
 
     /**
@@ -197,7 +197,15 @@ object Pkcs12Importer {
     }
 
     private fun isSelfSigned(cert: X509Certificate): Boolean {
-        return cert.subjectX500Principal == cert.issuerX500Principal
+        if (cert.subjectX500Principal != cert.issuerX500Principal) {
+            return false
+        }
+        return try {
+            cert.verify(cert.publicKey)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     internal fun isPasswordOrMacError(err: Throwable): Boolean {

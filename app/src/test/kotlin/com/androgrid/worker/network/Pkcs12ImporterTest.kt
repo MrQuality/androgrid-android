@@ -138,7 +138,7 @@ class Pkcs12ImporterTest {
         val p12Bytes = buildModernOpenSsl3P12(cert, key, pass)
 
         var primaryInvoked = false
-        val result = Pkcs12Importer.import(p12Bytes, pass) { _, _ ->
+        val result = Pkcs12Importer.importWithLoader(p12Bytes, pass) { _, _ ->
             primaryInvoked = true
             throw KeyStoreException("Simulated Android platform PBES2 failure")
         }
