@@ -29,7 +29,12 @@ import com.androgrid.worker.network.MtlsSocketFactoryProvider
 import com.androgrid.worker.network.Pkcs12ImportResult
 import com.androgrid.worker.network.Pkcs12Importer
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -43,10 +48,12 @@ class SettingsActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "SettingsActivity"
+        internal const val MAX_P12_BYTES = 1024 * 1024 // 1 MiB cap for PKCS#12 bundles
     }
 
     internal lateinit var repository: ClusterSettingsRepository
     internal var mtlsProvider: MtlsSocketFactoryProvider = DefaultMtlsSocketFactoryProvider
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     private lateinit var wifiHostInput: EditText
     private lateinit var wifiPortInput: EditText
@@ -279,64 +286,108 @@ class SettingsActivity : ComponentActivity() {
         Toast.makeText(this, "Cluster settings restored to defaults", Toast.LENGTH_SHORT).show()
     }
 
-    internal fun handleP12Import(uri: Uri, password: CharArray = charArrayOf()) {
-        try {
-            val stream = contentResolver.openInputStream(uri)
-            if (stream == null) {
-                val msg = "Unable to open PKCS#12 file stream for URI: $uri"
-                Log.w(TAG, msg)
-                showP12Status(msg, isError = true)
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                return
-            }
+    internal fun handleP12Import(
+        uri: Uri,
+        password: CharArray = charArrayOf(),
+        fromDialog: Boolean = false
+    ): Job {
+        return lifecycleScope.launch {
+            try {
+                val bytes = withContext(ioDispatcher) {
+                    val stream = contentResolver.openInputStream(uri)
+                        ?: return@withContext null
+                    stream.use { readBoundedBytes(it, MAX_P12_BYTES) }
+                }
 
-            val bytes = stream.use { it.readBytes() }
-            when (val result = Pkcs12Importer.import(bytes, password)) {
-                is Pkcs12ImportResult.Success -> {
-                    clientCertInput.setText(result.credentials.clientCertPem)
-                    clientKeyInput.setText(result.credentials.clientKeyPem)
-                    if (!result.credentials.caCertPem.isNullOrBlank() && caCertInput.text.isNullOrBlank()) {
-                        caCertInput.setText(result.credentials.caCertPem)
+                if (bytes == null) {
+                    val msg = "Unable to open selected PKCS#12 file stream."
+                    Log.w(TAG, msg)
+                    showP12Status(msg, isError = true)
+                    Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                val result = withContext(ioDispatcher) {
+                    Pkcs12Importer.import(bytes, password)
+                }
+
+                when (result) {
+                    is Pkcs12ImportResult.Success -> {
+                        clientCertInput.setText(result.credentials.clientCertPem)
+                        clientKeyInput.setText(result.credentials.clientKeyPem)
+                        if (!result.credentials.caCertPem.isNullOrBlank() && caCertInput.text.isNullOrBlank()) {
+                            caCertInput.setText(result.credentials.caCertPem)
+                        }
+                        val msg = "PKCS#12 credentials extracted - tap Save Settings to apply."
+                        showP12Status(msg, isError = false)
+                        Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_SHORT).show()
                     }
-                    val msg = "PKCS#12 credentials extracted successfully"
-                    showP12Status(msg, isError = false)
-                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-                }
-                is Pkcs12ImportResult.PasswordRequired -> {
-                    Log.w(TAG, "PKCS#12 bundle requires passphrase: ${result.reason}")
-                    if (password.isEmpty()) {
-                        promptForP12Password(uri)
-                    } else {
-                        val msg = "Incorrect PKCS#12 passphrase: ${result.reason}"
-                        showP12Status(msg, isError = true)
-                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    is Pkcs12ImportResult.PasswordRequired -> {
+                        Log.w(TAG, "PKCS#12 bundle requires passphrase: ${result.reason}")
+                        val promptMsg = if (fromDialog) {
+                            "Incorrect passphrase. Please try again."
+                        } else {
+                            "Enter the passphrase for this .p12 bundle."
+                        }
+                        if (fromDialog) {
+                            showP12Status(promptMsg, isError = true)
+                        }
+                        promptForP12Password(uri, promptMsg)
+                    }
+                    is Pkcs12ImportResult.Failure -> {
+                        Log.e(TAG, result.userMessage, result.cause)
+                        showP12Status(result.userMessage, isError = true)
+                        Toast.makeText(this@SettingsActivity, result.userMessage, Toast.LENGTH_LONG).show()
                     }
                 }
-                is Pkcs12ImportResult.Failure -> {
-                    Log.e(TAG, result.userMessage, result.cause)
-                    showP12Status(result.userMessage, isError = true)
-                    Toast.makeText(this, result.userMessage, Toast.LENGTH_LONG).show()
-                }
+            } catch (e: Exception) {
+                val msg = "Failed to read PKCS#12 bundle: ${e.message ?: e.javaClass.simpleName}"
+                Log.e(TAG, msg, e)
+                showP12Status(msg, isError = true)
+                Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
             }
-        } catch (e: Exception) {
-            val msg = "Failed to read PKCS#12 bundle: ${e.message ?: e.javaClass.simpleName}"
-            Log.e(TAG, msg, e)
-            showP12Status(msg, isError = true)
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun promptForP12Password(uri: Uri) {
+    private fun readBoundedBytes(stream: InputStream, maxBytes: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val read = stream.read(buf)
+            if (read == -1) break
+            total += read
+            if (total > maxBytes) {
+                throw IllegalArgumentException(
+                    "PKCS#12 file exceeds maximum allowed size of ${maxBytes / 1024} KiB."
+                )
+            }
+            out.write(buf, 0, read)
+        }
+        return out.toByteArray()
+    }
+
+    private fun promptForP12Password(
+        uri: Uri,
+        message: String = "Enter the passphrase for this .p12 bundle."
+    ) {
         val passwordInput = EditText(this).apply {
             hint = "PKCS#12 passphrase"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         AlertDialog.Builder(this)
             .setTitle("PKCS#12 Passphrase Required")
-            .setMessage("Enter the passphrase for this .p12 bundle (leave empty if none).")
+            .setMessage(message)
             .setView(passwordInput)
             .setPositiveButton("Import") { _, _ ->
-                handleP12Import(uri, passwordInput.text.toString().toCharArray())
+                val entered = passwordInput.text.toString().toCharArray()
+                if (entered.isEmpty()) {
+                    val err = "Passphrase cannot be empty."
+                    showP12Status(err, isError = true)
+                    promptForP12Password(uri, err)
+                } else {
+                    handleP12Import(uri, entered, fromDialog = true)
+                }
             }
             .setNegativeButton("Cancel") { _, _ ->
                 showP12Status("PKCS#12 import cancelled (passphrase required).", isError = true)
