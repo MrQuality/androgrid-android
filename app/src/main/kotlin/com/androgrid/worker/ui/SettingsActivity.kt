@@ -70,6 +70,7 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var resetButton: Button
     private lateinit var importP12Button: Button
     private lateinit var scanQrButton: Button
+    private var activeP12ImportJob: Job? = null
 
     private val qrScanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -291,13 +292,16 @@ class SettingsActivity : ComponentActivity() {
         password: CharArray = charArrayOf(),
         fromDialog: Boolean = false
     ): Job {
-        return lifecycleScope.launch {
+        activeP12ImportJob?.cancel()
+        val job = lifecycleScope.launch {
             try {
                 val bytes = withContext(ioDispatcher) {
                     val stream = contentResolver.openInputStream(uri)
                         ?: return@withContext null
                     stream.use { readBoundedBytes(it, MAX_P12_BYTES) }
                 }
+
+                if (isFinishing || isDestroyed) return@launch
 
                 if (bytes == null) {
                     val msg = "Unable to open selected PKCS#12 file stream."
@@ -310,6 +314,8 @@ class SettingsActivity : ComponentActivity() {
                 val result = withContext(ioDispatcher) {
                     Pkcs12Importer.import(bytes, password)
                 }
+
+                if (isFinishing || isDestroyed) return@launch
 
                 when (result) {
                     is Pkcs12ImportResult.Success -> {
@@ -340,13 +346,22 @@ class SettingsActivity : ComponentActivity() {
                         Toast.makeText(this@SettingsActivity, result.userMessage, Toast.LENGTH_LONG).show()
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
+                if (isFinishing || isDestroyed) return@launch
                 val msg = "Failed to read PKCS#12 bundle: ${e.message ?: e.javaClass.simpleName}"
                 Log.e(TAG, msg, e)
                 showP12Status(msg, isError = true)
                 Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+            } finally {
+                if (fromDialog) {
+                    password.fill('\u0000')
+                }
             }
         }
+        activeP12ImportJob = job
+        return job
     }
 
     private fun readBoundedBytes(stream: InputStream, maxBytes: Int): ByteArray {
@@ -371,6 +386,7 @@ class SettingsActivity : ComponentActivity() {
         uri: Uri,
         message: String = "Enter the passphrase for this .p12 bundle."
     ) {
+        if (isFinishing || isDestroyed) return
         val passwordInput = EditText(this).apply {
             hint = "PKCS#12 passphrase"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -380,7 +396,9 @@ class SettingsActivity : ComponentActivity() {
             .setMessage(message)
             .setView(passwordInput)
             .setPositiveButton("Import") { _, _ ->
-                val entered = passwordInput.text.toString().toCharArray()
+                val editable = passwordInput.text
+                val entered = CharArray(editable.length)
+                editable.getChars(0, editable.length, entered, 0)
                 if (entered.isEmpty()) {
                     val err = "Passphrase cannot be empty."
                     showP12Status(err, isError = true)
@@ -390,6 +408,9 @@ class SettingsActivity : ComponentActivity() {
                 }
             }
             .setNegativeButton("Cancel") { _, _ ->
+                showP12Status("PKCS#12 import cancelled (passphrase required).", isError = true)
+            }
+            .setOnCancelListener {
                 showP12Status("PKCS#12 import cancelled (passphrase required).", isError = true)
             }
             .show()
