@@ -1,12 +1,15 @@
 package com.androgrid.worker.ui
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -23,8 +26,15 @@ import com.androgrid.worker.network.ClusterSettings
 import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.MtlsSocketFactoryProvider
+import com.androgrid.worker.network.Pkcs12ImportResult
+import com.androgrid.worker.network.Pkcs12Importer
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -36,23 +46,31 @@ import java.util.Locale
  */
 class SettingsActivity : ComponentActivity() {
 
+    companion object {
+        private const val TAG = "SettingsActivity"
+        internal const val MAX_P12_BYTES = 1024 * 1024 // 1 MiB cap for PKCS#12 bundles
+    }
+
     internal lateinit var repository: ClusterSettingsRepository
     internal var mtlsProvider: MtlsSocketFactoryProvider = DefaultMtlsSocketFactoryProvider
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     private lateinit var wifiHostInput: EditText
     private lateinit var wifiPortInput: EditText
     private lateinit var cellularHostInput: EditText
     private lateinit var cellularPortInput: EditText
 
-    private lateinit var caCertInput: EditText
-    private lateinit var clientCertInput: EditText
-    private lateinit var clientKeyInput: EditText
+    internal lateinit var caCertInput: EditText
+    internal lateinit var clientCertInput: EditText
+    internal lateinit var clientKeyInput: EditText
 
     private lateinit var validationBanner: TextView
+    internal lateinit var p12StatusBanner: TextView
     private lateinit var saveButton: Button
     private lateinit var resetButton: Button
     private lateinit var importP12Button: Button
     private lateinit var scanQrButton: Button
+    private var activeP12ImportJob: Job? = null
 
     private val qrScanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -160,6 +178,20 @@ class SettingsActivity : ComponentActivity() {
         }
         rootLayout.addView(importP12Button)
 
+        p12StatusBanner = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setPadding(20, 12, 20, 12)
+            visibility = View.GONE
+        }
+        val p12BannerParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 12, 0, 12)
+        }
+        rootLayout.addView(p12StatusBanner, p12BannerParams)
+
         rootLayout.addView(createFieldLabel("Root CA Certificate (PEM):"))
         caCertInput = createMultiLineInput()
         rootLayout.addView(caCertInput)
@@ -255,30 +287,141 @@ class SettingsActivity : ComponentActivity() {
         Toast.makeText(this, "Cluster settings restored to defaults", Toast.LENGTH_SHORT).show()
     }
 
-    private fun handleP12Import(uri: Uri) {
-        try {
-            contentResolver.openInputStream(uri)?.use { stream: InputStream ->
-                val bytes = stream.readBytes()
-                val ks = java.security.KeyStore.getInstance("PKCS12").apply {
-                    load(java.io.ByteArrayInputStream(bytes), charArrayOf())
+    internal fun handleP12Import(
+        uri: Uri,
+        password: CharArray = charArrayOf(),
+        fromDialog: Boolean = false
+    ): Job {
+        activeP12ImportJob?.cancel()
+        val job = lifecycleScope.launch {
+            try {
+                val bytes = withContext(ioDispatcher) {
+                    val stream = contentResolver.openInputStream(uri)
+                        ?: return@withContext null
+                    stream.use { readBoundedBytes(it, MAX_P12_BYTES) }
                 }
-                val alias = ks.aliases().nextElement()
-                val cert = ks.getCertificate(alias) as? java.security.cert.X509Certificate
-                val key = ks.getKey(alias, charArrayOf())
 
-                if (cert != null) {
-                    val certB64 = java.util.Base64.getMimeEncoder(64, byteArrayOf('\n'.code.toByte())).encodeToString(cert.encoded)
-                    clientCertInput.setText("-----BEGIN CERTIFICATE-----\n$certB64\n-----END CERTIFICATE-----")
+                if (isFinishing || isDestroyed) return@launch
+
+                if (bytes == null) {
+                    val msg = "Unable to open selected PKCS#12 file stream."
+                    Log.w(TAG, msg)
+                    showP12Status(msg, isError = true)
+                    Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+                    return@launch
                 }
-                if (key != null) {
-                    val keyB64 = java.util.Base64.getMimeEncoder(64, byteArrayOf('\n'.code.toByte())).encodeToString(key.encoded)
-                    clientKeyInput.setText("-----BEGIN PRIVATE KEY-----\n$keyB64\n-----END PRIVATE KEY-----")
+
+                val result = withContext(ioDispatcher) {
+                    Pkcs12Importer.import(bytes, password)
                 }
-                Toast.makeText(this, "PKCS#12 credentials extracted successfully", Toast.LENGTH_SHORT).show()
+
+                if (isFinishing || isDestroyed) return@launch
+
+                when (result) {
+                    is Pkcs12ImportResult.Success -> {
+                        clientCertInput.setText(result.credentials.clientCertPem)
+                        clientKeyInput.setText(result.credentials.clientKeyPem)
+                        if (!result.credentials.caCertPem.isNullOrBlank() && caCertInput.text.isNullOrBlank()) {
+                            caCertInput.setText(result.credentials.caCertPem)
+                        }
+                        val msg = "PKCS#12 credentials extracted - tap Save Settings to apply."
+                        showP12Status(msg, isError = false)
+                        Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_SHORT).show()
+                    }
+                    is Pkcs12ImportResult.PasswordRequired -> {
+                        Log.w(TAG, "PKCS#12 bundle requires passphrase: ${result.reason}")
+                        val promptMsg = if (fromDialog) {
+                            "Incorrect passphrase. Please try again."
+                        } else {
+                            "Enter the passphrase for this .p12 bundle."
+                        }
+                        if (fromDialog) {
+                            showP12Status(promptMsg, isError = true)
+                        }
+                        promptForP12Password(uri, promptMsg)
+                    }
+                    is Pkcs12ImportResult.Failure -> {
+                        Log.e(TAG, result.userMessage, result.cause)
+                        showP12Status(result.userMessage, isError = true)
+                        Toast.makeText(this@SettingsActivity, result.userMessage, Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (isFinishing || isDestroyed) return@launch
+                val msg = "Failed to read PKCS#12 bundle: ${e.message ?: e.javaClass.simpleName}"
+                Log.e(TAG, msg, e)
+                showP12Status(msg, isError = true)
+                Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+            } finally {
+                if (fromDialog) {
+                    password.fill('\u0000')
+                }
             }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Failed to read PKCS#12 bundle: ${e.message}", Toast.LENGTH_LONG).show()
         }
+        activeP12ImportJob = job
+        return job
+    }
+
+    private fun readBoundedBytes(stream: InputStream, maxBytes: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val read = stream.read(buf)
+            if (read == -1) break
+            total += read
+            if (total > maxBytes) {
+                throw IllegalArgumentException(
+                    "PKCS#12 file exceeds maximum allowed size of ${maxBytes / 1024} KiB."
+                )
+            }
+            out.write(buf, 0, read)
+        }
+        return out.toByteArray()
+    }
+
+    private fun promptForP12Password(
+        uri: Uri,
+        message: String = "Enter the passphrase for this .p12 bundle."
+    ) {
+        if (isFinishing || isDestroyed) return
+        val passwordInput = EditText(this).apply {
+            hint = "PKCS#12 passphrase"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        AlertDialog.Builder(this)
+            .setTitle("PKCS#12 Passphrase Required")
+            .setMessage(message)
+            .setView(passwordInput)
+            .setPositiveButton("Import") { _, _ ->
+                val editable = passwordInput.text
+                val entered = CharArray(editable.length)
+                editable.getChars(0, editable.length, entered, 0)
+                if (entered.isEmpty()) {
+                    val err = "Passphrase cannot be empty."
+                    showP12Status(err, isError = true)
+                    promptForP12Password(uri, err)
+                } else {
+                    handleP12Import(uri, entered, fromDialog = true)
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                showP12Status("PKCS#12 import cancelled (passphrase required).", isError = true)
+            }
+            .setOnCancelListener {
+                showP12Status("PKCS#12 import cancelled (passphrase required).", isError = true)
+            }
+            .show()
+    }
+
+    private fun showP12Status(message: String, isError: Boolean) {
+        p12StatusBanner.text = message
+        p12StatusBanner.setBackgroundColor(
+            if (isError) Color.parseColor("#B71C1C") else Color.parseColor("#1B5E20")
+        )
+        p12StatusBanner.visibility = View.VISIBLE
     }
 
     internal fun handleScannedQrPayload(rawContent: String) {
