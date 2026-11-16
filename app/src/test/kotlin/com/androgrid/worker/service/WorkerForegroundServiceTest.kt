@@ -386,4 +386,71 @@ class WorkerForegroundServiceTest {
         assertThat(inFlight).isEmpty()
         assertThat(activeJobs).isEmpty()
     }
+
+    @Test
+    fun testWifiSyncTaskProcessor_consecutiveRunAttempts_serializeViaCancelAndJoin(): Unit = runTest {
+        val attempt1Started = CompletableDeferred<Unit>()
+        val attempt1CleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
+        val attempt2SawAttempt1CleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
+        val activeExecutions = AtomicInteger(0)
+        val maxConcurrent = AtomicInteger(0)
+
+        val engine = object : ComputeEngine {
+            override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+                val current = activeExecutions.incrementAndGet()
+                maxConcurrent.updateAndGet { prev -> maxOf(prev, current) }
+                try {
+                    if (task.runAttempt == 1) {
+                        attempt1Started.complete(Unit)
+                        try {
+                            CompletableDeferred<Unit>().await()
+                        } finally {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                                kotlinx.coroutines.delay(30)
+                                attempt1CleanedUp.set(true)
+                            }
+                        }
+                    } else {
+                        attempt2SawAttempt1CleanedUp.set(attempt1CleanedUp.get())
+                    }
+                    return TaskExecutionResult(
+                        exitCode = 0,
+                        stdoutBytes = ByteArray(0),
+                        stderrBytes = ByteArray(0)
+                    )
+                } finally {
+                    activeExecutions.decrementAndGet()
+                }
+            }
+        }
+
+        val ledger = InMemoryTaskLedgerRepository()
+        val activeJobs = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+        val processor = WifiSyncTaskProcessor(
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            ledgerRepository = ledger,
+            nodeId = "wifi-test-node",
+            activeJobs = activeJobs
+        )
+
+        val attempt1 = TaskSpec.newBuilder()
+            .setTaskId("serial-task")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom(byteArrayOf(0x00, 0x61, 0x73, 0x6D)))
+            .build()
+        val attempt2 = attempt1.toBuilder().setRunAttempt(2).build()
+
+        val job1 = processor.launchTaskIfEligible(this, attempt1)!!
+        attempt1Started.await()
+
+        val job2 = processor.launchTaskIfEligible(this, attempt2)!!
+        job2.join()
+
+        assertThat(job1.isCancelled).isTrue()
+        assertThat(attempt1CleanedUp.get()).isTrue()
+        assertThat(attempt2SawAttempt1CleanedUp.get()).isTrue()
+        assertThat(maxConcurrent.get()).isEqualTo(1)
+        assertThat(activeJobs).isEmpty()
+    }
 }

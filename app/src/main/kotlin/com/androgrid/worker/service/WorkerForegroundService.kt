@@ -44,12 +44,14 @@ import com.androgrid.worker.telemetry.TaskLedgerRepository
 import com.androgrid.worker.telemetry.TaskLedgerStatus
 import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChangedBy
@@ -395,9 +397,13 @@ class WorkerForegroundService : Service() {
     private fun stopSyncLoop() {
         syncJob?.cancel()
         syncJob = null
-        serviceScope.launch {
-            wifiClient?.shutdown(500L)
-            wifiClient = null
+        val clientToClose = wifiClient
+        wifiClient = null
+        if (clientToClose != null) {
+            // Shut down outside serviceScope so serviceJob.cancel() in onDestroy() cannot abort teardown
+            CoroutineScope(Dispatchers.IO).launch {
+                clientToClose.shutdown(100L)
+            }
         }
     }
 
@@ -492,9 +498,11 @@ internal class WifiSyncTaskProcessor(
         if (!inFlightTasks.add(attemptKey)) {
             return null
         }
+        val priorJobDeferred = CompletableDeferred<Job?>()
         lateinit var launchedJob: Job
         launchedJob = scope.launch(start = CoroutineStart.LAZY) {
             try {
+                priorJobDeferred.await()?.cancelAndJoin()
                 val resolvedTask = when (
                     val resolution = artifactResolver.resolve(desiredTask, nodeId) { req ->
                         val rpc = fetchArtifactRpc
@@ -575,7 +583,9 @@ internal class WifiSyncTaskProcessor(
                 activeJobs.remove(desiredTask.taskId, launchedJob)
             }
         }
-        activeJobs.put(desiredTask.taskId, launchedJob)?.cancel()
+        val priorJob = activeJobs.put(desiredTask.taskId, launchedJob)
+        priorJob?.cancel()
+        priorJobDeferred.complete(priorJob)
         if (!launchedJob.start() && launchedJob.isCancelled) {
             inFlightTasks.remove(attemptKey)
             activeJobs.remove(desiredTask.taskId, launchedJob)
