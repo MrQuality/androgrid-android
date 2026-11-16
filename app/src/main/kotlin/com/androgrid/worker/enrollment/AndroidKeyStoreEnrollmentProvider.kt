@@ -166,6 +166,26 @@ class AndroidKeyStoreEnrollmentProvider internal constructor(
         }
     }
 
+    override fun hasKey(alias: String): Boolean {
+        return keyStore.containsAlias(alias) && (keyStore.getKey(alias, null) is PrivateKey)
+    }
+
+    override fun listAliases(prefix: String): List<String> {
+        val result = mutableListOf<String>()
+        val aliases = keyStore.aliases()
+        while (aliases.hasMoreElements()) {
+            val name = aliases.nextElement()
+            if (name.startsWith(prefix)) {
+                result.add(name)
+            }
+        }
+        return result
+    }
+
+    override fun getPublicKeyEncoded(alias: String): ByteArray? {
+        return keyStore.getCertificate(alias)?.publicKey?.encoded
+    }
+
     companion object {
         const val ANDROID_KEYSTORE_PROVIDER = "AndroidKeyStore"
         const val DEFAULT_ENROLLMENT_ALIAS = "androgrid_worker_mtls_key"

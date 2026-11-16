@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.net.ConnectivityManager
+import com.androgrid.worker.enrollment.AndroidKeyStoreEnrollmentProvider
+import com.androgrid.worker.enrollment.CredentialLifecycleManager
 import com.androgrid.worker.network.ArtifactMemoryCache
 import com.androgrid.worker.network.ArtifactResolver
 import com.androgrid.worker.network.ClusterSettingsRepository
@@ -11,6 +13,7 @@ import com.androgrid.worker.network.NetworkRouteMonitor
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.service.AndroidServiceController
 import com.androgrid.worker.service.AndroidWorkScheduler
+import com.androgrid.worker.service.CertificateRenewalWorker
 import com.androgrid.worker.service.DefaultWorkerParticipationController
 import com.androgrid.worker.service.WorkerLifecycleCoordinator
 import com.androgrid.worker.service.WorkerParticipationController
@@ -76,6 +79,16 @@ class AndroGridApplication : Application() {
 
     val artifactResolver: ArtifactResolver by lazy {
         ArtifactResolver(artifactMemoryCache)
+    }
+
+    val credentialLifecycleManager: CredentialLifecycleManager by lazy {
+        CredentialLifecycleManager(
+            settingsRepository = settingsRepository,
+            keyProvider = AndroidKeyStoreEnrollmentProvider.createDefault(),
+            onScheduleRenewal = { delayMs ->
+                CertificateRenewalWorker.schedule(this, delayMs)
+            }
+        )
     }
 
     override fun onTrimMemory(level: Int) {

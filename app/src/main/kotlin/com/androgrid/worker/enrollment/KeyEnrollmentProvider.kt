@@ -84,6 +84,21 @@ interface KeyEnrollmentProvider {
      * @param alias Identifier alias for the key pair to purge.
      */
     fun deleteKey(alias: String)
+
+    /**
+     * Returns true if a private key entry exists under [alias] (even before CA certificate installation).
+     */
+    fun hasKey(alias: String): Boolean = isEnrolled(alias)
+
+    /**
+     * Lists all KeyStore aliases matching [prefix].
+     */
+    fun listAliases(prefix: String): List<String> = emptyList()
+
+    /**
+     * Returns the canonical DER-encoded SubjectPublicKeyInfo (SPKI) bytes for [alias], or null if absent.
+     */
+    fun getPublicKeyEncoded(alias: String): ByteArray? = null
 }
 
 /**
@@ -163,6 +178,14 @@ class SoftwareKeyEnrollmentProvider : KeyEnrollmentProvider {
         keyPairs.remove(alias)
         certChains.remove(alias)
     }
+
+    override fun hasKey(alias: String): Boolean = keyPairs.containsKey(alias)
+
+    override fun listAliases(prefix: String): List<String> =
+        keyPairs.keys.filter { it.startsWith(prefix) }
+
+    override fun getPublicKeyEncoded(alias: String): ByteArray? =
+        keyPairs[alias]?.public?.encoded
 
     /**
      * Testing helper generating a self-signed X.509 certificate for the generated key pair.
