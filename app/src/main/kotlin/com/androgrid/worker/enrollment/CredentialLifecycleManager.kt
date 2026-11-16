@@ -6,18 +6,25 @@ import com.androgrid.worker.network.ClusterSettings
 import com.androgrid.worker.network.ClusterSettingsRepository
 import com.androgrid.worker.network.CredentialLifecycleRecord
 import com.androgrid.worker.network.CredentialLifecycleState
+import com.androgrid.worker.network.MtlsContext
 import io.grpc.Metadata
 import io.grpc.Status
 import io.grpc.StatusException
 import io.grpc.StatusRuntimeException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x500.style.BCStyle
+import org.bouncycastle.asn1.x500.style.IETFUtils
 import java.io.ByteArrayInputStream
+import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.interfaces.ECPublicKey
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLException
 import kotlin.math.min
 
 /**
@@ -52,6 +59,20 @@ class CredentialLifecycleManager(
 ) {
     private val mutex = Mutex()
     private val activeConsumers = ConcurrentHashMap<String, AtomicInteger>()
+    private val cachedNextEligibleEpochSecs = AtomicLong(0L)
+
+    /**
+     * Returns the in-memory cached next eligible renewal timestamp (Unix epoch seconds)
+     * so high-frequency sync loops can skip lock/prefs reads while backed off.
+     */
+    fun getNextEligibleRenewalEpochSeconds(): Long = cachedNextEligibleEpochSecs.get()
+
+    /**
+     * Constructs an [MtlsContext] for a candidate [alias] using this manager's configured [keyProvider].
+     */
+    fun createCandidateMtlsContext(alias: String, caCertPem: String): MtlsContext {
+        return keyProvider.createMtlsContext(alias, caCertPem)
+    }
 
     /**
      * Increments the active consumer reference count for [alias] so it cannot be deleted
@@ -235,6 +256,8 @@ class CredentialLifecycleManager(
         }
 
         if (record.nextEligibleRenewalEpochSeconds > nowSecs) {
+            cachedNextEligibleEpochSecs.set(record.nextEligibleRenewalEpochSeconds)
+            onScheduleRenewal?.invoke(((record.nextEligibleRenewalEpochSeconds - nowSecs).coerceAtLeast(60L)) * 1000L)
             return@withLock RenewalOutcome.BackedOff
         }
 
@@ -244,83 +267,142 @@ class CredentialLifecycleManager(
                 ?: AndroidKeyStoreEnrollmentProvider.DEFAULT_ENROLLMENT_ALIAS
         }
 
-        // Step 1: Reuse existing PENDING staging key/CSR if present, else create a new staging alias
-        val (stagingAlias, csrPem) = if (
-            record.state == CredentialLifecycleState.PENDING &&
+        // Resume CANDIDATE_VERIFYING directly at Step 5 without re-signing a new CSR
+        val resumedCandidate = if (
+            record.state == CredentialLifecycleState.CANDIDATE_VERIFYING &&
             record.stagingAlias.isNotBlank() &&
-            record.pendingCsrPem.isNotBlank() &&
-            keyProvider.hasKey(record.stagingAlias)
+            record.candidateCertPem.isNotBlank() &&
+            keyProvider.isEnrolled(record.stagingAlias)
         ) {
-            record.stagingAlias to record.pendingCsrPem
+            val spki = keyProvider.getPublicKeyEncoded(record.stagingAlias)
+            if (spki != null && validateIssuedCertificate(
+                    clientCertPem = record.candidateCertPem,
+                    existingCaPem = settings.caCertPem,
+                    expectedNodeId = nodeId,
+                    expectedSpkiDer = spki,
+                    nowMs = nowMs
+                ) == null
+            ) {
+                record.stagingAlias to record.candidateCertPem
+            } else {
+                keyProvider.deleteKey(record.stagingAlias)
+                null
+            }
         } else {
-            val newAlias = "${AndroidKeyStoreEnrollmentProvider.DEFAULT_ENROLLMENT_ALIAS}_$nowMs"
-            keyProvider.generateKeyPair(newAlias)
-            val generatedCsr = keyProvider.generateCsrPem(newAlias, nodeId)
-            val pendingRecord = CredentialLifecycleRecord(
-                state = CredentialLifecycleState.PENDING,
+            null
+        }
+
+        val (stagingAlias, candidateCertPem, notAfterEpochSecs) = if (resumedCandidate != null) {
+            val cert = parseSingleCert(resumedCandidate.second)
+            val expSecs = (cert?.notAfter?.time ?: nowMs) / 1000L
+            Triple(resumedCandidate.first, resumedCandidate.second, expSecs)
+        } else {
+            // Step 1: Reuse existing PENDING staging key/CSR if present, else create a new staging alias
+            val (pendingAlias, csrPem) = if (
+                record.state == CredentialLifecycleState.PENDING &&
+                record.stagingAlias.isNotBlank() &&
+                record.pendingCsrPem.isNotBlank() &&
+                keyProvider.hasKey(record.stagingAlias)
+            ) {
+                record.stagingAlias to record.pendingCsrPem
+            } else {
+                val newAlias = "${AndroidKeyStoreEnrollmentProvider.DEFAULT_ENROLLMENT_ALIAS}_$nowMs"
+                keyProvider.generateKeyPair(newAlias)
+                val generatedCsr = keyProvider.generateCsrPem(newAlias, nodeId)
+                val pendingRecord = CredentialLifecycleRecord(
+                    state = CredentialLifecycleState.PENDING,
+                    activeAlias = activeAlias,
+                    stagingAlias = newAlias,
+                    pendingCsrPem = generatedCsr,
+                    consecutiveFailures = record.consecutiveFailures
+                )
+                if (!settingsRepository.commitSettingsAndLifecycle(settings, pendingRecord)) {
+                    keyProvider.deleteKey(newAlias)
+                    return@withLock RenewalOutcome.Failed("Failed to persist PENDING renewal state")
+                }
+                newAlias to generatedCsr
+            }
+
+            // Step 2: Submit CSR over the currently active mTLS channel
+            val rpcResult = renewRpc(RenewCertificateRequest.newBuilder().setCsrPem(csrPem).build())
+            val response = rpcResult.getOrElse { err ->
+                return@withLock handleRpcErrorLocked(settings, activeAlias, pendingAlias, csrPem, record.consecutiveFailures, nowSecs, err)
+            }
+
+            // Step 3: Local X.509 profile validation (no trust-anchor swap in v1)
+            val stagingSpki = keyProvider.getPublicKeyEncoded(pendingAlias)
+                ?: return@withLock abortPendingLocked(
+                    settings, activeAlias, pendingAlias, record.consecutiveFailures, nowSecs, "Missing staging public key"
+                )
+            val validationError = validateIssuedCertificate(
+                clientCertPem = response.clientCertPem,
+                existingCaPem = settings.caCertPem,
+                expectedNodeId = nodeId,
+                expectedSpkiDer = stagingSpki,
+                nowMs = nowMs
+            )
+            if (validationError != null) {
+                return@withLock abortPendingLocked(
+                    settings, activeAlias, pendingAlias, record.consecutiveFailures, nowSecs, validationError
+                )
+            }
+
+            // Step 4: Install into stagingAlias and persist CANDIDATE_VERIFYING
+            keyProvider.installCertificateChain(pendingAlias, response.clientCertPem, settings.caCertPem)
+            val verifyingRecord = CredentialLifecycleRecord(
+                state = CredentialLifecycleState.CANDIDATE_VERIFYING,
                 activeAlias = activeAlias,
-                stagingAlias = newAlias,
-                pendingCsrPem = generatedCsr,
+                stagingAlias = pendingAlias,
+                candidateCertPem = response.clientCertPem,
                 consecutiveFailures = record.consecutiveFailures
             )
-            if (!settingsRepository.commitSettingsAndLifecycle(settings, pendingRecord)) {
-                keyProvider.deleteKey(newAlias)
-                return@withLock RenewalOutcome.Failed("Failed to persist PENDING renewal state")
+            if (!settingsRepository.commitSettingsAndLifecycle(settings, verifyingRecord)) {
+                return@withLock abortPendingLocked(
+                    settings, activeAlias, pendingAlias, record.consecutiveFailures, nowSecs, "Failed to persist CANDIDATE_VERIFYING"
+                )
             }
-            newAlias to generatedCsr
-        }
-
-        // Step 2: Submit CSR over the currently active mTLS channel
-        val rpcResult = renewRpc(RenewCertificateRequest.newBuilder().setCsrPem(csrPem).build())
-        val response = rpcResult.getOrElse { err ->
-            return@withLock handleRpcErrorLocked(settings, activeAlias, stagingAlias, csrPem, record.consecutiveFailures, nowSecs, err)
-        }
-
-        // Step 3: Local X.509 profile validation (no trust-anchor swap in v1)
-        val stagingSpki = keyProvider.getPublicKeyEncoded(stagingAlias)
-            ?: return@withLock abortPendingLocked(settings, activeAlias, stagingAlias, "Missing staging public key")
-        val validationError = validateIssuedCertificate(
-            clientCertPem = response.clientCertPem,
-            existingCaPem = settings.caCertPem,
-            expectedNodeId = nodeId,
-            expectedSpkiDer = stagingSpki,
-            nowMs = nowMs
-        )
-        if (validationError != null) {
-            return@withLock abortPendingLocked(settings, activeAlias, stagingAlias, validationError)
-        }
-
-        // Step 4: Install into stagingAlias and persist CANDIDATE_VERIFYING
-        keyProvider.installCertificateChain(stagingAlias, response.clientCertPem, settings.caCertPem)
-        val verifyingRecord = CredentialLifecycleRecord(
-            state = CredentialLifecycleState.CANDIDATE_VERIFYING,
-            activeAlias = activeAlias,
-            stagingAlias = stagingAlias,
-            candidateCertPem = response.clientCertPem
-        )
-        if (!settingsRepository.commitSettingsAndLifecycle(settings, verifyingRecord)) {
-            return@withLock abortPendingLocked(settings, activeAlias, stagingAlias, "Failed to persist CANDIDATE_VERIFYING")
+            Triple(pendingAlias, response.clientCertPem, response.notAfterEpochSeconds)
         }
 
         // Step 5: Trial authentication on a candidate channel using an operational RPC
-        val trialResult = trialCandidateRpc(stagingAlias, response.clientCertPem)
+        val trialResult = trialCandidateRpc(stagingAlias, candidateCertPem)
         val trialValue = trialResult.getOrElse { err ->
-            keyProvider.deleteKey(stagingAlias)
-            settingsRepository.commitSettingsAndLifecycle(
-                settings,
-                CredentialLifecycleRecord(
-                    state = CredentialLifecycleState.ACTIVE,
-                    activeAlias = activeAlias,
-                    nextEligibleRenewalEpochSeconds = nowSecs + computeBackoffSeconds(record.consecutiveFailures + 1),
-                    consecutiveFailures = record.consecutiveFailures + 1
+            val nextFailures = record.consecutiveFailures + 1
+            val nextEpoch = nowSecs + computeBackoffSeconds(nextFailures)
+            cachedNextEligibleEpochSecs.set(nextEpoch)
+            onScheduleRenewal?.invoke(((nextEpoch - nowSecs).coerceAtLeast(60L)) * 1000L)
+
+            if (isAuthOrTlsRejection(err)) {
+                keyProvider.deleteKey(stagingAlias)
+                settingsRepository.commitSettingsAndLifecycle(
+                    settings,
+                    CredentialLifecycleRecord(
+                        state = CredentialLifecycleState.ACTIVE,
+                        activeAlias = activeAlias,
+                        nextEligibleRenewalEpochSeconds = nextEpoch,
+                        consecutiveFailures = nextFailures
+                    )
                 )
-            )
+            } else {
+                // Preserve CANDIDATE_VERIFYING on transient network errors so next retry avoids re-signing
+                settingsRepository.commitSettingsAndLifecycle(
+                    settings,
+                    CredentialLifecycleRecord(
+                        state = CredentialLifecycleState.CANDIDATE_VERIFYING,
+                        activeAlias = activeAlias,
+                        stagingAlias = stagingAlias,
+                        candidateCertPem = candidateCertPem,
+                        nextEligibleRenewalEpochSeconds = nextEpoch,
+                        consecutiveFailures = nextFailures
+                    )
+                )
+            }
             return@withLock RenewalOutcome.Failed("Candidate trial RPC failed: ${err.message}")
         }
 
         // Step 6: Atomically commit RETIRING + updated ClusterSettings (retaining existing caCertPem)
         val newSettings = settings.copy(
-            clientCertPem = response.clientCertPem,
+            clientCertPem = candidateCertPem,
             clientKeyPem = "keystore:$stagingAlias"
         )
         val retiringRecord = CredentialLifecycleRecord(
@@ -331,6 +413,7 @@ class CredentialLifecycleManager(
         if (!settingsRepository.commitSettingsAndLifecycle(newSettings, retiringRecord)) {
             return@withLock RenewalOutcome.Failed("Failed to commit RETIRING credential activation")
         }
+        cachedNextEligibleEpochSecs.set(0L)
 
         // Step 7: Delete retiring alias only if zero consumers remain
         retireOldAliasIfDrainedLocked()
@@ -338,8 +421,8 @@ class CredentialLifecycleManager(
 
         RenewalOutcome.Renewed(
             newAlias = stagingAlias,
-            newCertPem = response.clientCertPem,
-            notAfterEpochSeconds = response.notAfterEpochSeconds,
+            newCertPem = candidateCertPem,
+            notAfterEpochSeconds = notAfterEpochSecs,
             trialResult = trialValue
         )
     }
@@ -368,14 +451,22 @@ class CredentialLifecycleManager(
         settings: ClusterSettings,
         activeAlias: String,
         stagingAlias: String,
+        prevFailures: Int,
+        nowSecs: Long,
         reason: String
     ): RenewalOutcome.Failed {
         keyProvider.deleteKey(stagingAlias)
+        val failures = prevFailures + 1
+        val nextEpoch = nowSecs + computeBackoffSeconds(failures)
+        cachedNextEligibleEpochSecs.set(nextEpoch)
+        onScheduleRenewal?.invoke(((nextEpoch - nowSecs).coerceAtLeast(60L)) * 1000L)
         settingsRepository.commitSettingsAndLifecycle(
             settings,
             CredentialLifecycleRecord(
                 state = CredentialLifecycleState.ACTIVE,
-                activeAlias = activeAlias
+                activeAlias = activeAlias,
+                nextEligibleRenewalEpochSeconds = nextEpoch,
+                consecutiveFailures = failures
             )
         )
         return RenewalOutcome.Failed(reason)
@@ -395,12 +486,15 @@ class CredentialLifecycleManager(
 
         return when (status?.code) {
             Status.Code.INVALID_ARGUMENT -> {
-                // Bad CSR: discard staging key so next attempt generates a fresh one
-                abortPendingLocked(settings, activeAlias, stagingAlias, "CSR rejected: ${status.description}")
+                // Bad CSR: discard staging key so next attempt generates a fresh one with backoff
+                abortPendingLocked(
+                    settings, activeAlias, stagingAlias, prevFailures, nowSecs, "CSR rejected: ${status.description}"
+                )
             }
             Status.Code.UNIMPLEMENTED,
             Status.Code.PERMISSION_DENIED -> {
                 val nextEpoch = nowSecs + TWENTY_FOUR_HOURS_SECS
+                cachedNextEligibleEpochSecs.set(nextEpoch)
                 settingsRepository.commitSettingsAndLifecycle(
                     settings,
                     CredentialLifecycleRecord(
@@ -417,6 +511,7 @@ class CredentialLifecycleManager(
             Status.Code.FAILED_PRECONDITION -> {
                 val serverNext = parseEpochHeader(trailers, HEADER_NEXT_RENEWAL_EPOCH)
                 val nextEpoch = serverNext ?: (nowSecs + TWENTY_FOUR_HOURS_SECS)
+                cachedNextEligibleEpochSecs.set(nextEpoch)
                 settingsRepository.commitSettingsAndLifecycle(
                     settings,
                     CredentialLifecycleRecord(
@@ -434,6 +529,7 @@ class CredentialLifecycleManager(
             Status.Code.RESOURCE_EXHAUSTED -> {
                 val retryAfter = parseEpochHeader(trailers, HEADER_RETRY_AFTER_EPOCH)
                 val nextEpoch = retryAfter ?: (nowSecs + computeBackoffSeconds(failures))
+                cachedNextEligibleEpochSecs.set(nextEpoch)
                 settingsRepository.commitSettingsAndLifecycle(
                     settings,
                     CredentialLifecycleRecord(
@@ -445,10 +541,12 @@ class CredentialLifecycleManager(
                         consecutiveFailures = failures
                     )
                 )
+                onScheduleRenewal?.invoke(((nextEpoch - nowSecs).coerceAtLeast(60L)) * 1000L)
                 RenewalOutcome.Failed("Renewal rate limited: ${status.description}")
             }
             else -> {
                 val nextEpoch = nowSecs + computeBackoffSeconds(failures)
+                cachedNextEligibleEpochSecs.set(nextEpoch)
                 settingsRepository.commitSettingsAndLifecycle(
                     settings,
                     CredentialLifecycleRecord(
@@ -460,6 +558,7 @@ class CredentialLifecycleManager(
                         consecutiveFailures = failures
                     )
                 )
+                onScheduleRenewal?.invoke(((nextEpoch - nowSecs).coerceAtLeast(60L)) * 1000L)
                 RenewalOutcome.Failed("Transient renewal failure: ${err.message}")
             }
         }
@@ -531,12 +630,18 @@ class CredentialLifecycleManager(
                 return "Issued certificate missing ClientAuth ExtendedKeyUsage"
             }
 
-            val dn = leaf.subjectX500Principal.name
-            if (!dn.contains("CN=$expectedNodeId")) {
-                return "Issued certificate CN mismatch (expected $expectedNodeId, got $dn)"
+            val x500Name = X500Name(leaf.subjectX500Principal.encoded)
+            val cnValues = x500Name.getRDNs(BCStyle.CN).flatMap { rdn ->
+                rdn.typesAndValues.map { IETFUtils.valueToString(it.value) }
             }
-            if (!dn.contains("OU=Edge Compute")) {
-                return "Issued certificate missing OU=Edge Compute"
+            if (cnValues.size != 1 || cnValues[0] != expectedNodeId) {
+                return "Issued certificate CN mismatch (expected $expectedNodeId, got $cnValues)"
+            }
+            val ouValues = x500Name.getRDNs(BCStyle.OU).flatMap { rdn ->
+                rdn.typesAndValues.map { IETFUtils.valueToString(it.value) }
+            }
+            if (ouValues.size != 1 || ouValues[0] != "Edge Compute") {
+                return "Issued certificate OU mismatch (expected Edge Compute, got $ouValues)"
             }
 
             if (nowMs < leaf.notBefore.time || nowMs >= leaf.notAfter.time) {
@@ -571,6 +676,19 @@ class CredentialLifecycleManager(
                 is StatusRuntimeException -> err.status to err.trailers
                 else -> null to null
             }
+        }
+
+        private fun isAuthOrTlsRejection(err: Throwable): Boolean {
+            val (status, _) = extractGrpcStatus(err)
+            if (status?.code == Status.Code.UNAUTHENTICATED || status?.code == Status.Code.PERMISSION_DENIED) {
+                return true
+            }
+            var cur: Throwable? = err
+            while (cur != null) {
+                if (cur is SSLException || cur is CertificateException) return true
+                cur = cur.cause
+            }
+            return false
         }
 
         private fun parseEpochHeader(trailers: Metadata?, name: String): Long? {
