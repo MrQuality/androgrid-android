@@ -22,10 +22,13 @@ import com.androgrid.worker.capability.StandardRootChecker
 import com.androgrid.worker.enrollment.AndroidKeyStoreEnrollmentProvider
 import com.androgrid.worker.enrollment.CredentialLifecycleManager
 import com.androgrid.worker.enrollment.RenewalOutcome
+import com.androgrid.worker.network.ArtifactResolver
 import com.androgrid.worker.network.CellularClaimOutcome
 import com.androgrid.worker.network.CellularTransportClient
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
+import com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener
+import com.androgrid.worker.telemetry.SharedPreferencesTaskLedgerRepository
 import java.util.concurrent.TimeUnit
 
 /**
@@ -44,7 +47,12 @@ class CertificateRenewalWorker(
         val settingsRepo = app?.settingsRepository
             ?: SharedPreferencesClusterSettingsRepository.getInstance(applicationContext)
         val lifecycleManager = app?.credentialLifecycleManager
-            ?: CredentialLifecycleManager(settingsRepo)
+            ?: CredentialLifecycleManager(
+                settingsRepository = settingsRepo,
+                onScheduleRenewal = { delayMs -> schedule(applicationContext, delayMs) }
+            )
+
+        lifecycleManager.reconcileOnStartup()
 
         val settings = settingsRepo.getSettings()
         if (!settings.hasMtlsCredentials) {
@@ -59,15 +67,24 @@ class CertificateRenewalWorker(
             ?: return Result.success()
 
         val nodeId = NodeIdProvider.getOrCreateNodeId(applicationContext)
-        val battery = AndroidBatteryStatusProvider(applicationContext).getBatteryStatus()
-        val capabilities = DeviceCapabilityProvider(
+        val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
+        val battery = batteryProvider.getBatteryStatus()
+        val capabilityProvider = DeviceCapabilityProvider(
             StandardRootChecker(),
             AndroidSystemInfoProvider(applicationContext)
-        ).buildCapabilities(
+        )
+        val thermalListener = AndroidDeviceThermalStatusListener(applicationContext).apply {
+            startListening()
+        }
+        val artifactResolver = app?.artifactResolver ?: ArtifactResolver()
+        val ledgerRepository = app?.taskLedgerRepository
+            ?: SharedPreferencesTaskLedgerRepository.getInstance(applicationContext)
+
+        val capabilities = capabilityProvider.buildCapabilities(
             currentTransport = NetworkTransportType.NETWORK_TRANSPORT_CELLULAR_WAN,
             isMetered = true,
             batteryTemperatureCelsius = battery.temperatureCelsius,
-            thermalStatus = 0
+            thermalStatus = thermalListener.currentThermalStatus
         )
 
         lifecycleManager.acquireGeneration(activeAlias)
@@ -75,19 +92,23 @@ class CertificateRenewalWorker(
             val activeClient = CellularTransportClient(
                 ingressHost = settings.cellularHost,
                 ingressPort = settings.cellularPort,
-                sslSocketFactory = mtlsContext.socketFactory
+                sslSocketFactory = mtlsContext.socketFactory,
+                artifactResolver = artifactResolver
             )
 
             val outcome = lifecycleManager.renewIfDue(
                 nodeId = nodeId,
                 renewRpc = { req -> activeClient.renewCertificate(req) },
                 trialCandidateRpc = { candidateAlias, _ ->
-                    val candidateContext = AndroidKeyStoreEnrollmentProvider.createDefault()
-                        .createMtlsContext(candidateAlias, settings.caCertPem)
+                    val candidateContext = lifecycleManager.createCandidateMtlsContext(
+                        candidateAlias,
+                        settings.caCertPem
+                    )
                     val candidateClient = CellularTransportClient(
                         ingressHost = settings.cellularHost,
                         ingressPort = settings.cellularPort,
-                        sslSocketFactory = candidateContext.socketFactory
+                        sslSocketFactory = candidateContext.socketFactory,
+                        artifactResolver = artifactResolver
                     )
                     val claimReq = ClaimCellularTaskRequest.newBuilder()
                         .setNodeId(nodeId)
@@ -95,19 +116,51 @@ class CertificateRenewalWorker(
                         .setBatteryLevelPct(battery.levelPercent)
                         .setIsCharging(battery.isCharging)
                         .setBatteryTemperatureCelsius(battery.temperatureCelsius)
+                        .setThermalStatus(thermalListener.currentThermalStatus)
                         .build()
-                    val claimResult = candidateClient.claimTask(claimReq)
-                    claimResult
+                    val claimOutcome = candidateClient.claimAndResolveTask(claimReq)
+                    if (claimOutcome is CellularClaimOutcome.TransientFailure) {
+                        kotlin.Result.failure(claimOutcome.cause)
+                    } else {
+                        kotlin.Result.success(claimOutcome)
+                    }
                 }
             )
 
             when (outcome) {
+                is RenewalOutcome.Renewed<*> -> {
+                    val preClaimed = outcome.trialResult as? CellularClaimOutcome
+                    if (preClaimed is CellularClaimOutcome.TaskReady ||
+                        preClaimed is CellularClaimOutcome.TerminalArtifactFailure
+                    ) {
+                        val latestSettings = settingsRepo.getSettings()
+                        val latestMtls = DefaultMtlsSocketFactoryProvider.buildSocketFactory(latestSettings)
+                        if (latestMtls != null) {
+                            val submitClient = CellularTransportClient(
+                                ingressHost = latestSettings.cellularHost,
+                                ingressPort = latestSettings.cellularPort,
+                                sslSocketFactory = latestMtls.socketFactory,
+                                artifactResolver = artifactResolver
+                            )
+                            val workerLogic = CellularSpotWorkerLogic(
+                                nodeId = nodeId,
+                                batteryProvider = batteryProvider,
+                                capabilityProvider = capabilityProvider,
+                                cellularClient = submitClient,
+                                thermalListener = thermalListener,
+                                ledgerRepository = ledgerRepository
+                            )
+                            return workerLogic.executeSpotTask(preClaimed)
+                        }
+                    }
+                    Result.success()
+                }
                 is RenewalOutcome.NotDue,
-                is RenewalOutcome.Renewed<*> -> Result.success()
                 is RenewalOutcome.BackedOff -> Result.success()
                 is RenewalOutcome.Failed -> if (outcome.terminal) Result.failure() else Result.retry()
             }
         } finally {
+            thermalListener.stopListening()
             lifecycleManager.releaseGeneration(activeAlias)
         }
     }
@@ -135,7 +188,7 @@ class CertificateRenewalWorker(
 
             WorkManager.getInstance(context).enqueueUniqueWork(
                 WORK_NAME,
-                ExistingWorkPolicy.KEEP,
+                ExistingWorkPolicy.UPDATE,
                 request
             )
         }

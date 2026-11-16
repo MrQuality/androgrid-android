@@ -253,12 +253,14 @@ class CellularSpotWorker(
                 nodeId = nodeId,
                 renewRpc = { req -> currentClient.renewCertificate(req) },
                 trialCandidateRpc = { candidateAlias, _ ->
-                    val candidateCtx = AndroidKeyStoreEnrollmentProvider.createDefault()
-                        .createMtlsContext(candidateAlias, settings.caCertPem)
+                    val candidateContext = lifecycleManager.createCandidateMtlsContext(
+                        candidateAlias,
+                        settings.caCertPem
+                    )
                     val candidateClient = CellularTransportClient(
                         ingressHost = settings.cellularHost,
                         ingressPort = settings.cellularPort,
-                        sslSocketFactory = candidateCtx.socketFactory,
+                        sslSocketFactory = candidateContext.socketFactory,
                         artifactResolver = artifactResolver
                     )
                     val battery = batteryProvider.getBatteryStatus()

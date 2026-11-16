@@ -1,6 +1,8 @@
 package com.androgrid.worker.enrollment
 
 import com.androgrid.worker.network.ClusterSettingsRepository
+import com.androgrid.worker.network.CredentialLifecycleRecord
+import com.androgrid.worker.network.CredentialLifecycleState
 
 /**
  * High-level coordinator managing on-device key pair generation, CSR creation,
@@ -70,11 +72,18 @@ class EnrollmentCoordinator(
                         settingsRepository.updateWifiEndpoint(host, port)
                     }
 
-                    // For clientKeyPem, anchor it to KeyStore alias
-                    settingsRepository.updateCertificates(
+                    // For clientKeyPem, anchor it to KeyStore alias and reset lifecycle state atomically
+                    val updatedSettings = settingsRepository.getSettings().copy(
                         caCertPem = result.caCertPem,
                         clientCertPem = result.clientCertPem,
                         clientKeyPem = "keystore:$keyAlias"
+                    )
+                    settingsRepository.commitSettingsAndLifecycle(
+                        updatedSettings,
+                        CredentialLifecycleRecord(
+                            state = CredentialLifecycleState.ACTIVE,
+                            activeAlias = keyAlias
+                        )
                     )
 
                     EnrollmentResult.Success(result.clientCertPem, result.caCertPem)

@@ -262,16 +262,21 @@ class WorkerForegroundService : Service() {
 
                             // Check in-band certificate renewal without dropping session_token or active tasks
                             val currentSettings = settingsRepo.getSettings()
+                            val nowSecs = System.currentTimeMillis() / 1000L
                             var syncResult: Result<com.androgrid.v1.SyncNodeStateResponse>? = null
-                            if (lifecycleManager.isWithinRenewalWindow(currentSettings.clientCertPem)) {
+                            if (nowSecs >= lifecycleManager.getNextEligibleRenewalEpochSeconds() &&
+                                lifecycleManager.isWithinRenewalWindow(currentSettings.clientCertPem)
+                            ) {
                                 val oldClient = activeClientRef.get()!!
                                 val oldAlias = activeAliasRef.get()
                                 val renewalOutcome = lifecycleManager.renewIfDue(
                                     nodeId = nodeId,
                                     renewRpc = { req -> oldClient.renewCertificate(req) },
                                     trialCandidateRpc = { candidateAlias, _ ->
-                                        val candidateCtx = AndroidKeyStoreEnrollmentProvider.createDefault()
-                                            .createMtlsContext(candidateAlias, currentSettings.caCertPem)
+                                        val candidateCtx = lifecycleManager.createCandidateMtlsContext(
+                                            candidateAlias,
+                                            currentSettings.caCertPem
+                                        )
                                         val candidateClient = WifiSyncClient(
                                             host = currentSettings.wifiHost,
                                             port = currentSettings.wifiPort,
@@ -280,24 +285,29 @@ class WorkerForegroundService : Service() {
                                         )
                                         val trialSync = candidateClient.syncNodeState(syncRequest)
                                         if (trialSync.isSuccess) {
-                                            lifecycleManager.acquireGeneration(candidateAlias)
-                                            activeClientRef.set(candidateClient)
-                                            activeAliasRef.set(candidateAlias)
-                                            wifiClient = candidateClient
-                                            serviceScope.launch {
-                                                oldClient.shutdown(500L)
-                                                lifecycleManager.releaseGeneration(oldAlias)
-                                            }
-                                            Result.success(trialSync.getOrThrow())
+                                            Result.success(candidateClient to trialSync.getOrThrow())
                                         } else {
                                             candidateClient.shutdown(100L)
-                                            Result.failure(trialSync.exceptionOrNull() ?: IllegalStateException("Trial SyncNodeState failed"))
+                                            Result.failure(
+                                                trialSync.exceptionOrNull()
+                                                    ?: IllegalStateException("Trial SyncNodeState failed")
+                                            )
                                         }
                                     }
                                 )
                                 if (renewalOutcome is RenewalOutcome.Renewed<*>) {
                                     @Suppress("UNCHECKED_CAST")
-                                    syncResult = Result.success(renewalOutcome.trialResult as com.androgrid.v1.SyncNodeStateResponse)
+                                    val (candidateClient, trialResp) =
+                                        renewalOutcome.trialResult as Pair<WifiSyncClient, com.androgrid.v1.SyncNodeStateResponse>
+                                    lifecycleManager.acquireGeneration(renewalOutcome.newAlias)
+                                    activeClientRef.set(candidateClient)
+                                    activeAliasRef.set(renewalOutcome.newAlias)
+                                    wifiClient = candidateClient
+                                    serviceScope.launch {
+                                        oldClient.shutdown(500L)
+                                        lifecycleManager.releaseGeneration(oldAlias)
+                                    }
+                                    syncResult = Result.success(trialResp)
                                 }
                             }
 
@@ -330,9 +340,11 @@ class WorkerForegroundService : Service() {
                             delay(SYNC_INTERVAL_MS)
                         }
                     } finally {
-                        thermalListener.stopListening()
-                        activeClientRef.get()?.shutdown(100L)
-                        lifecycleManager.releaseGeneration(activeAliasRef.get())
+                        withContext(NonCancellable) {
+                            thermalListener.stopListening()
+                            activeClientRef.get()?.shutdown(100L)
+                            lifecycleManager.releaseGeneration(activeAliasRef.get())
+                        }
                     }
                 }
         }
