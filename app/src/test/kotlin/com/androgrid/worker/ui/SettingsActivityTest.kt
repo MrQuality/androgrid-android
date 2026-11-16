@@ -120,6 +120,64 @@ class SettingsActivityTest {
         controller.destroy()
     }
 
+    @Test
+    fun testSettingsActivity_handleP12Import_validAndInvalidBundles() {
+        val repo = InMemoryClusterSettingsRepository()
+        val controller = Robolectric.buildActivity(SettingsActivity::class.java)
+        val activity = controller.get()
+        activity.repository = repo
+
+        controller.create().start().resume()
+
+        // Corrupt file surfaces persistent inline error banner instead of silent failure
+        val badFile = java.io.File.createTempFile("bad-", ".p12", activity.cacheDir).apply {
+            writeBytes("not-valid-pkcs12".toByteArray())
+        }
+        activity.handleP12Import(android.net.Uri.fromFile(badFile))
+        assertThat(activity.p12StatusBanner.visibility).isEqualTo(android.view.View.VISIBLE)
+        assertThat(activity.p12StatusBanner.text.toString()).contains("Failed to parse PKCS#12")
+
+        // Valid PKCS#12 populates certificate and private key fields
+        val kpg = java.security.KeyPairGenerator.getInstance("EC").apply {
+            initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
+        }
+        val kp = kpg.generateKeyPair()
+        val now = System.currentTimeMillis()
+        val certBuilder = org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+            org.bouncycastle.asn1.x500.X500Name("CN=p12-ui-test"),
+            java.math.BigInteger.valueOf(now),
+            java.util.Date(now - 60_000),
+            java.util.Date(now + 86_400_000),
+            org.bouncycastle.asn1.x500.X500Name("CN=p12-ui-test"),
+            kp.public
+        )
+        val signer = org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withECDSA")
+            .build(kp.private)
+        val cert = org.bouncycastle.cert.jcajce.JcaX509CertificateConverter()
+            .getCertificate(certBuilder.build(signer))
+
+        val ks = java.security.KeyStore.getInstance("PKCS12", org.bouncycastle.jce.provider.BouncyCastleProvider()).apply {
+            load(null, charArrayOf())
+            setKeyEntry("worker", kp.private, charArrayOf(), arrayOf(cert))
+        }
+        val goodFile = java.io.File.createTempFile("good-", ".p12", activity.cacheDir)
+        goodFile.outputStream().use { ks.store(it, charArrayOf()) }
+
+        activity.handleP12Import(android.net.Uri.fromFile(goodFile))
+        assertThat(activity.p12StatusBanner.visibility).isEqualTo(android.view.View.VISIBLE)
+        assertThat(activity.p12StatusBanner.text.toString()).contains("extracted successfully")
+
+        val multiLineEdits = getAllViews(activity.window.decorView)
+            .filterIsInstance<EditText>()
+            .filter { it.hint == "-----BEGIN ...-----" }
+        assertThat(multiLineEdits.any { it.text.toString().contains("-----BEGIN CERTIFICATE-----") }).isTrue()
+        assertThat(multiLineEdits.any { it.text.toString().contains("-----BEGIN PRIVATE KEY-----") }).isTrue()
+
+        badFile.delete()
+        goodFile.delete()
+        controller.destroy()
+    }
+
     private fun findEditTextByHint(activity: SettingsActivity, hint: String): EditText? {
         val allViews = getAllViews(activity.window.decorView)
         return allViews.filterIsInstance<EditText>().find { it.hint == hint }
