@@ -16,10 +16,13 @@ import java.io.ByteArrayOutputStream
 import java.math.BigInteger
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
+import javax.crypto.AEADBadTagException
+import javax.crypto.BadPaddingException
 
 /**
  * Unit tests for [Pkcs12Importer] covering OpenSSL 3.x PBES2/AES-256-CBC/SHA-256 bundles,
@@ -126,5 +129,101 @@ class Pkcs12ImporterTest {
         val result = Pkcs12Importer.import(out.toByteArray())
         assertThat(result).isInstanceOf(Pkcs12ImportResult.Failure::class.java)
         assertThat((result as Pkcs12ImportResult.Failure).userMessage).contains("no private key")
+    }
+
+    @Test
+    fun testImport_fallsBackToBouncyCastleWhenPrimaryLoaderFails() {
+        val (cert, key) = generateEcCertAndKey("worker-fallback")
+        val pass = "pbes2-pass".toCharArray()
+        val p12Bytes = buildModernOpenSsl3P12(cert, key, pass)
+
+        var primaryInvoked = false
+        val result = Pkcs12Importer.import(p12Bytes, pass) { _, _ ->
+            primaryInvoked = true
+            throw KeyStoreException("Simulated Android platform PBES2 failure")
+        }
+
+        assertThat(primaryInvoked).isTrue()
+        assertThat(result).isInstanceOf(Pkcs12ImportResult.Success::class.java)
+        val creds = (result as Pkcs12ImportResult.Success).credentials
+        assertThat(creds.clientCertPem).contains("-----BEGIN CERTIFICATE-----")
+        assertThat(creds.clientKeyPem).contains("-----BEGIN PRIVATE KEY-----")
+    }
+
+    @Test
+    fun testImport_wrongNonEmptyPassword_returnsPasswordRequired() {
+        val (cert, key) = generateEcCertAndKey("worker-wrong-pass")
+        val p12Bytes = buildModernOpenSsl3P12(cert, key, "correct-pass".toCharArray())
+
+        val result = Pkcs12Importer.import(p12Bytes, "wrong-pass".toCharArray())
+        assertThat(result).isInstanceOf(Pkcs12ImportResult.PasswordRequired::class.java)
+    }
+
+    @Test
+    fun testImport_multiCertChain_preservesIntermediateInClientCertAndRoutesRootToCaCert() {
+        val kpg = KeyPairGenerator.getInstance("EC").apply {
+            initialize(ECGenParameterSpec("secp256r1"))
+        }
+        val rootKp = kpg.generateKeyPair()
+        val interKp = kpg.generateKeyPair()
+        val leafKp = kpg.generateKeyPair()
+        val now = System.currentTimeMillis()
+
+        val rootCert = JcaX509CertificateConverter().getCertificate(
+            JcaX509v3CertificateBuilder(
+                X500Name("CN=AndroGrid Root CA"),
+                BigInteger.valueOf(1),
+                Date(now - 60_000),
+                Date(now + 86_400_000),
+                X500Name("CN=AndroGrid Root CA"),
+                rootKp.public
+            ).build(JcaContentSignerBuilder("SHA256withECDSA").build(rootKp.private))
+        )
+        val interCert = JcaX509CertificateConverter().getCertificate(
+            JcaX509v3CertificateBuilder(
+                X500Name("CN=AndroGrid Root CA"),
+                BigInteger.valueOf(2),
+                Date(now - 60_000),
+                Date(now + 86_400_000),
+                X500Name("CN=AndroGrid Intermediate CA"),
+                interKp.public
+            ).build(JcaContentSignerBuilder("SHA256withECDSA").build(rootKp.private))
+        )
+        val leafCert = JcaX509CertificateConverter().getCertificate(
+            JcaX509v3CertificateBuilder(
+                X500Name("CN=AndroGrid Intermediate CA"),
+                BigInteger.valueOf(3),
+                Date(now - 60_000),
+                Date(now + 86_400_000),
+                X500Name("CN=worker-chain-01"),
+                leafKp.public
+            ).build(JcaContentSignerBuilder("SHA256withECDSA").build(interKp.private))
+        )
+
+        val ks = KeyStore.getInstance("PKCS12", BouncyCastleProvider()).apply {
+            load(null, charArrayOf())
+            setKeyEntry("worker", leafKp.private, charArrayOf(), arrayOf(leafCert, interCert, rootCert))
+        }
+        val out = ByteArrayOutputStream()
+        ks.store(out, charArrayOf())
+
+        val result = Pkcs12Importer.import(out.toByteArray())
+        assertThat(result).isInstanceOf(Pkcs12ImportResult.Success::class.java)
+        val creds = (result as Pkcs12ImportResult.Success).credentials
+        // clientCertPem has leaf + intermediate (2 certs)
+        assertThat(creds.clientCertPem.split("-----BEGIN CERTIFICATE-----").size - 1).isEqualTo(2)
+        // caCertPem has self-signed root (1 cert)
+        assertThat(creds.caCertPem).isNotNull()
+        assertThat(creds.caCertPem!!.split("-----BEGIN CERTIFICATE-----").size - 1).isEqualTo(1)
+    }
+
+    @Test
+    fun testIsPasswordOrMacError_matchesCryptoExceptions() {
+        assertThat(Pkcs12Importer.isPasswordOrMacError(BadPaddingException("bad pad"))).isTrue()
+        assertThat(Pkcs12Importer.isPasswordOrMacError(AEADBadTagException("bad tag"))).isTrue()
+        assertThat(
+            Pkcs12Importer.isPasswordOrMacError(RuntimeException("outer", BadPaddingException("inner")))
+        ).isTrue()
+        assertThat(Pkcs12Importer.isPasswordOrMacError(IllegalStateException("unrelated"))).isFalse()
     }
 }

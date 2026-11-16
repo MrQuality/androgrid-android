@@ -60,9 +60,9 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var cellularHostInput: EditText
     private lateinit var cellularPortInput: EditText
 
-    private lateinit var caCertInput: EditText
-    private lateinit var clientCertInput: EditText
-    private lateinit var clientKeyInput: EditText
+    internal lateinit var caCertInput: EditText
+    internal lateinit var clientCertInput: EditText
+    internal lateinit var clientKeyInput: EditText
 
     private lateinit var validationBanner: TextView
     internal lateinit var p12StatusBanner: TextView

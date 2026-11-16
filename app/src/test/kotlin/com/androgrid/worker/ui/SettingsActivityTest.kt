@@ -1,5 +1,6 @@
 package com.androgrid.worker.ui
 
+import android.app.AlertDialog
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -7,11 +8,16 @@ import com.androgrid.worker.network.ClusterSettings
 import com.androgrid.worker.network.InMemoryClusterSettingsRepository
 import com.androgrid.worker.network.TestCertificateFixtures
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowAlertDialog
+import org.robolectric.shadows.ShadowLooper
 
 /**
  * Robolectric UI tests for [SettingsActivity].
@@ -126,6 +132,7 @@ class SettingsActivityTest {
         val controller = Robolectric.buildActivity(SettingsActivity::class.java)
         val activity = controller.get()
         activity.repository = repo
+        activity.ioDispatcher = Dispatchers.Main.immediate
 
         controller.create().start().resume()
 
@@ -133,11 +140,67 @@ class SettingsActivityTest {
         val badFile = java.io.File.createTempFile("bad-", ".p12", activity.cacheDir).apply {
             writeBytes("not-valid-pkcs12".toByteArray())
         }
-        activity.handleP12Import(android.net.Uri.fromFile(badFile))
+        runBlocking { activity.handleP12Import(android.net.Uri.fromFile(badFile)).join() }
+        ShadowLooper.idleMainLooper()
         assertThat(activity.p12StatusBanner.visibility).isEqualTo(android.view.View.VISIBLE)
         assertThat(activity.p12StatusBanner.text.toString()).contains("Failed to parse PKCS#12")
 
-        // Valid PKCS#12 populates certificate and private key fields
+        // Valid PKCS#12 populates clientCertInput and clientKeyInput specifically
+        val goodFile = createTestP12File(activity.cacheDir, charArrayOf())
+        runBlocking { activity.handleP12Import(android.net.Uri.fromFile(goodFile)).join() }
+        ShadowLooper.idleMainLooper()
+        assertThat(activity.p12StatusBanner.visibility).isEqualTo(android.view.View.VISIBLE)
+        assertThat(activity.p12StatusBanner.text.toString()).contains("tap Save Settings to apply")
+        assertThat(activity.clientCertInput.text.toString()).contains("-----BEGIN CERTIFICATE-----")
+        assertThat(activity.clientKeyInput.text.toString()).contains("-----BEGIN PRIVATE KEY-----")
+
+        badFile.delete()
+        goodFile.delete()
+        controller.destroy()
+    }
+
+    @Test
+    fun testSettingsActivity_handleP12Import_passwordDialog_emptyAndRetryFlow() {
+        val repo = InMemoryClusterSettingsRepository()
+        val controller = Robolectric.buildActivity(SettingsActivity::class.java)
+        val activity = controller.get()
+        activity.repository = repo
+        activity.ioDispatcher = Dispatchers.Main.immediate
+
+        controller.create().start().resume()
+
+        val pass = "my-p12-secret".toCharArray()
+        val protectedFile = createTestP12File(activity.cacheDir, pass)
+        val uri = android.net.Uri.fromFile(protectedFile)
+
+        // Initial import without password triggers passphrase dialog
+        runBlocking { activity.handleP12Import(uri).join() }
+        ShadowLooper.idleMainLooper()
+        val dialog1 = ShadowAlertDialog.getLatestAlertDialog() as? AlertDialog
+        assertThat(dialog1).isNotNull()
+
+        // Submitting empty passphrase shows error and re-prompts instead of looping into handleP12Import
+        dialog1!!.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        ShadowLooper.idleMainLooper()
+        assertThat(activity.p12StatusBanner.text.toString()).contains("Passphrase cannot be empty")
+        val dialog2 = ShadowAlertDialog.getLatestAlertDialog() as? AlertDialog
+        assertThat(dialog2).isNotNull()
+
+        // Entering correct passphrase populates clientCertInput and clientKeyInput
+        val passEdit = getAllViews(dialog2!!.window!!.decorView).filterIsInstance<EditText>().first()
+        passEdit.setText("my-p12-secret")
+        dialog2.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        ShadowLooper.idleMainLooper()
+
+        assertThat(activity.clientCertInput.text.toString()).contains("-----BEGIN CERTIFICATE-----")
+        assertThat(activity.clientKeyInput.text.toString()).contains("-----BEGIN PRIVATE KEY-----")
+        assertThat(activity.p12StatusBanner.text.toString()).contains("tap Save Settings to apply")
+
+        protectedFile.delete()
+        controller.destroy()
+    }
+
+    private fun createTestP12File(dir: java.io.File, password: CharArray): java.io.File {
         val kpg = java.security.KeyPairGenerator.getInstance("EC").apply {
             initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
         }
@@ -156,26 +219,16 @@ class SettingsActivityTest {
         val cert = org.bouncycastle.cert.jcajce.JcaX509CertificateConverter()
             .getCertificate(certBuilder.build(signer))
 
-        val ks = java.security.KeyStore.getInstance("PKCS12", org.bouncycastle.jce.provider.BouncyCastleProvider()).apply {
-            load(null, charArrayOf())
-            setKeyEntry("worker", kp.private, charArrayOf(), arrayOf(cert))
+        val ks = java.security.KeyStore.getInstance(
+            "PKCS12",
+            org.bouncycastle.jce.provider.BouncyCastleProvider()
+        ).apply {
+            load(null, password)
+            setKeyEntry("worker", kp.private, password, arrayOf(cert))
         }
-        val goodFile = java.io.File.createTempFile("good-", ".p12", activity.cacheDir)
-        goodFile.outputStream().use { ks.store(it, charArrayOf()) }
-
-        activity.handleP12Import(android.net.Uri.fromFile(goodFile))
-        assertThat(activity.p12StatusBanner.visibility).isEqualTo(android.view.View.VISIBLE)
-        assertThat(activity.p12StatusBanner.text.toString()).contains("extracted successfully")
-
-        val multiLineEdits = getAllViews(activity.window.decorView)
-            .filterIsInstance<EditText>()
-            .filter { it.hint == "-----BEGIN ...-----" }
-        assertThat(multiLineEdits.any { it.text.toString().contains("-----BEGIN CERTIFICATE-----") }).isTrue()
-        assertThat(multiLineEdits.any { it.text.toString().contains("-----BEGIN PRIVATE KEY-----") }).isTrue()
-
-        badFile.delete()
-        goodFile.delete()
-        controller.destroy()
+        return java.io.File.createTempFile("test-", ".p12", dir).apply {
+            outputStream().use { ks.store(it, password) }
+        }
     }
 
     private fun findEditTextByHint(activity: SettingsActivity, hint: String): EditText? {
