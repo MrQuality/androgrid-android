@@ -6,6 +6,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -13,6 +14,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.Executors
 
 /**
  * Comprehensive unit and hermetic integration tests for WasmComputeEngine.
@@ -371,6 +373,51 @@ class WasmComputeEngineTest {
             val elapsedMs = System.currentTimeMillis() - cancelStartMs
             assertThat(job.isCancelled).isTrue()
             assertThat(elapsedMs).isLessThan(500L)
+        }
+    }
+
+    @Test
+    fun testInfiniteLoop_cancelDoesNotPolluteThreadForNextTaskOnDispatchersDefault(): Unit = runBlocking {
+        val engine = WasmComputeEngine()
+        val cancelTask = TaskSpec.newBuilder()
+            .setTaskId("task_wasm_cancel_reuse_1")
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setTimeoutSeconds(60)
+            .setWasmBytecode(ByteString.copyFrom(TestWasmBytecodeFixtures.INFINITE_LOOP))
+            .build()
+
+        val fibTask = TaskSpec.newBuilder()
+            .setTaskId("task_wasm_cancel_reuse_2")
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setEntrypoint("fibonacci")
+            .putEnvVars("WASM_ARGS", "10")
+            .setTimeoutSeconds(10)
+            .setWasmBytecode(ByteString.copyFrom(TestWasmBytecodeFixtures.FIBONACCI))
+            .build()
+
+        // Cancel on Dispatchers.Default and also verify thread interrupt flag is cleared even when
+        // subsequent work runs on the same single-threaded dispatcher.
+        val singleThreadExecutor = Executors.newSingleThreadExecutor()
+        val pinnedDispatcher = singleThreadExecutor.asCoroutineDispatcher()
+        try {
+            val cancelJob = launch(pinnedDispatcher) {
+                engine.execute(cancelTask)
+            }
+            delay(25)
+            cancelJob.cancel()
+            withTimeout(1000L) {
+                cancelJob.join()
+            }
+            assertThat(cancelJob.isCancelled).isTrue()
+
+            val nextResult = kotlinx.coroutines.withContext(pinnedDispatcher) {
+                assertThat(Thread.currentThread().isInterrupted).isFalse()
+                engine.execute(fibTask)
+            }
+            assertThat(nextResult.isSuccess).isTrue()
+            assertThat(String(nextResult.stdoutBytes, Charsets.UTF_8).trim()).isEqualTo("55")
+        } finally {
+            pinnedDispatcher.close()
         }
     }
 }

@@ -191,135 +191,138 @@ class WasmComputeEngine(
                 workerThread.get()?.interrupt()
             }
         }
-        var instructionCount = 0
-        val listener = ExecutionListener { _: Instruction, _: MStack ->
-            instructionCount++
-            if ((instructionCount and 0x3FF) == 0 &&
-                (cancelled.get() || executionJob?.isActive == false || Thread.currentThread().isInterrupted)
-            ) {
-                throw WasmCancelledTrap()
+        try {
+            var instructionCount = 0
+            val listener = ExecutionListener { _: Instruction, _: MStack ->
+                instructionCount++
+                if ((instructionCount and 0x3FF) == 0 &&
+                    (cancelled.get() || executionJob?.isActive == false || Thread.currentThread().isInterrupted)
+                ) {
+                    throw WasmCancelledTrap()
+                }
             }
-        }
 
-        // Instantiate WASM module instance with WASI host functions and cooperative listener
-        val instance = try {
-            val builder = Instance.builder(module)
-                .withStart(false)
-                .withUnsafeExecutionListener(listener)
-            if (hasImports) {
-                builder.withImportValues(store.toImportValues())
+            // Instantiate WASM module instance with WASI host functions and cooperative listener
+            val instance = try {
+                val builder = Instance.builder(module)
+                    .withStart(false)
+                    .withUnsafeExecutionListener(listener)
+                if (hasImports) {
+                    builder.withImportValues(store.toImportValues())
+                }
+                builder.build()
+            } catch (t: Throwable) {
+                return TaskExecutionResult.failure(
+                    exitCode = -1,
+                    errorCode = "WASM_TRAP",
+                    errorMessage = "Failed to instantiate WASM module: ${t.message ?: t.javaClass.simpleName}"
+                )
             }
-            builder.build()
-        } catch (t: Throwable) {
-            completionHandle?.dispose()
-            return TaskExecutionResult.failure(
-                exitCode = -1,
-                errorCode = "WASM_TRAP",
-                errorMessage = "Failed to instantiate WASM module: ${t.message ?: t.javaClass.simpleName}"
-            )
-        }
 
-        // Resolve entrypoint function
-        val requestedEntrypoint = entrypoint.trim()
-        val targetName = if (requestedEntrypoint.isNotEmpty()) requestedEntrypoint else "_start"
+            // Resolve entrypoint function
+            val requestedEntrypoint = entrypoint.trim()
+            val targetName = if (requestedEntrypoint.isNotEmpty()) requestedEntrypoint else "_start"
 
-        val exportFunc: ExportFunction? = try {
-            instance.export(targetName)
-        } catch (e: Exception) {
-            null
-        }
-
-        val resolvedFunc: ExportFunction? = if (exportFunc == null && requestedEntrypoint.isEmpty()) {
-            try {
-                instance.export("main")
+            val exportFunc: ExportFunction? = try {
+                instance.export(targetName)
             } catch (e: Exception) {
                 null
             }
-        } else {
-            exportFunc
-        }
 
-        val func = resolvedFunc ?: run {
-            val missingName = if (requestedEntrypoint.isNotEmpty()) requestedEntrypoint else "_start"
-            return TaskExecutionResult.failure(
-                exitCode = -1,
-                errorCode = "ENTRYPOINT_NOT_FOUND",
-                errorMessage = "Exported entrypoint function '$missingName' was not found in WASM module"
-            )
-        }
-
-        // Parse optional numeric parameters from environment variable (e.g. WASM_ARGS="10,20")
-        val args = envVars["WASM_ARGS"]
-            ?.split(",")
-            ?.mapNotNull { it.trim().toLongOrNull() }
-            ?.toLongArray()
-            ?: longArrayOf()
-
-        return try {
-            workerThread.set(Thread.currentThread())
-            val results = if (args.isNotEmpty()) {
-                func.apply(*args)
+            val resolvedFunc: ExportFunction? = if (exportFunc == null && requestedEntrypoint.isEmpty()) {
+                try {
+                    instance.export("main")
+                } catch (e: Exception) {
+                    null
+                }
             } else {
-                func.apply()
+                exportFunc
             }
 
-            val stdoutBytes = stdoutStream.toByteArray()
-            val stderrBytes = stderrStream.toByteArray()
-
-            // If stdout stream was empty but function returned values, format values as output
-            val finalStdout = if (stdoutBytes.isEmpty() && results != null && results.isNotEmpty()) {
-                results.joinToString(" ").toByteArray(Charsets.UTF_8)
-            } else {
-                stdoutBytes
+            val func = resolvedFunc ?: run {
+                val missingName = if (requestedEntrypoint.isNotEmpty()) requestedEntrypoint else "_start"
+                return TaskExecutionResult.failure(
+                    exitCode = -1,
+                    errorCode = "ENTRYPOINT_NOT_FOUND",
+                    errorMessage = "Exported entrypoint function '$missingName' was not found in WASM module"
+                )
             }
 
-            TaskExecutionResult(
-                exitCode = 0,
-                stdoutBytes = finalStdout,
-                stderrBytes = stderrBytes
-            )
-        } catch (t: Throwable) {
-            if (t is WasmCancelledTrap || t.cause is WasmCancelledTrap) {
-                throw CancellationException("WASM execution cancelled", t)
-            }
-            val stdoutBytes = stdoutStream.toByteArray()
-            val stderrBytes = stderrStream.toByteArray()
-            val wasiExit = findWasiExitException(t)
-            if (wasiExit != null) {
-                val code = wasiExit.exitCode()
-                if (code == 0) {
-                    TaskExecutionResult(
-                        exitCode = 0,
-                        stdoutBytes = stdoutBytes,
-                        stderrBytes = stderrBytes
-                    )
+            // Parse optional numeric parameters from environment variable (e.g. WASM_ARGS="10,20")
+            val args = envVars["WASM_ARGS"]
+                ?.split(",")
+                ?.mapNotNull { it.trim().toLongOrNull() }
+                ?.toLongArray()
+                ?: longArrayOf()
+
+            return try {
+                workerThread.set(Thread.currentThread())
+                val results = if (args.isNotEmpty()) {
+                    func.apply(*args)
                 } else {
-                    val errorMsg = "WASI module exited with non-zero status: $code"
+                    func.apply()
+                }
+
+                val stdoutBytes = stdoutStream.toByteArray()
+                val stderrBytes = stderrStream.toByteArray()
+
+                // If stdout stream was empty but function returned values, format values as output
+                val finalStdout = if (stdoutBytes.isEmpty() && results != null && results.isNotEmpty()) {
+                    results.joinToString(" ").toByteArray(Charsets.UTF_8)
+                } else {
+                    stdoutBytes
+                }
+
+                TaskExecutionResult(
+                    exitCode = 0,
+                    stdoutBytes = finalStdout,
+                    stderrBytes = stderrBytes
+                )
+            } catch (t: Throwable) {
+                if (t is WasmCancelledTrap || t.cause is WasmCancelledTrap || cancelled.get()) {
+                    throw CancellationException("WASM execution cancelled", t)
+                }
+                val stdoutBytes = stdoutStream.toByteArray()
+                val stderrBytes = stderrStream.toByteArray()
+                val wasiExit = findWasiExitException(t)
+                if (wasiExit != null) {
+                    val code = wasiExit.exitCode()
+                    if (code == 0) {
+                        TaskExecutionResult(
+                            exitCode = 0,
+                            stdoutBytes = stdoutBytes,
+                            stderrBytes = stderrBytes
+                        )
+                    } else {
+                        val errorMsg = "WASI module exited with non-zero status: $code"
+                        TaskExecutionResult(
+                            exitCode = code,
+                            stdoutBytes = stdoutBytes,
+                            stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
+                            errorCode = "WASI_EXIT_NON_ZERO",
+                            errorMessage = errorMsg
+                        )
+                    }
+                } else {
+                    val errorMsg = if (t is WasmRuntimeException) {
+                        "WASM runtime trap: ${t.message ?: t.javaClass.simpleName}"
+                    } else {
+                        "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
+                    }
                     TaskExecutionResult(
-                        exitCode = code,
+                        exitCode = -1,
                         stdoutBytes = stdoutBytes,
                         stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
-                        errorCode = "WASI_EXIT_NON_ZERO",
+                        errorCode = "WASM_TRAP",
                         errorMessage = errorMsg
                     )
                 }
-            } else {
-                val errorMsg = if (t is WasmRuntimeException) {
-                    "WASM runtime trap: ${t.message ?: t.javaClass.simpleName}"
-                } else {
-                    "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
-                }
-                TaskExecutionResult(
-                    exitCode = -1,
-                    stdoutBytes = stdoutBytes,
-                    stderrBytes = if (stderrBytes.isNotEmpty()) stderrBytes else errorMsg.toByteArray(Charsets.UTF_8),
-                    errorCode = "WASM_TRAP",
-                    errorMessage = errorMsg
-                )
             }
         } finally {
             workerThread.set(null)
             completionHandle?.dispose()
+            // Clear any interrupt flag left on the shared Dispatchers.Default worker thread
+            Thread.interrupted()
         }
     }
 
