@@ -255,4 +255,98 @@ class WorkerForegroundServiceTest {
         assertThat(ledger.ledgerSnapshot.value.tasksCompletedCount).isEqualTo(1)
         assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(1)
     }
+
+    @Test
+    fun testWifiSyncTaskProcessor_cancelTask_cancelsActiveJobAndIsIdempotent(): Unit = runTest {
+        val started = CompletableDeferred<Unit>()
+        val neverCompletes = CompletableDeferred<TaskExecutionResult>()
+        val engine = object : ComputeEngine {
+            override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+                started.complete(Unit)
+                return neverCompletes.await()
+            }
+        }
+        val ledger = InMemoryTaskLedgerRepository()
+        val reports = ConcurrentLinkedQueue<TaskExecutionReport>()
+        val activeJobs = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+        val processor = WifiSyncTaskProcessor(
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            ledgerRepository = ledger,
+            completedReports = reports,
+            nodeId = "wifi-test-node",
+            activeJobs = activeJobs
+        )
+
+        val task = TaskSpec.newBuilder()
+            .setTaskId("cancel-target-1")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom(byteArrayOf(0x00, 0x61, 0x73, 0x6D)))
+            .build()
+
+        val job = processor.launchTaskIfEligible(this, task)
+        assertThat(job).isNotNull()
+        started.await()
+        assertThat(activeJobs.containsKey("cancel-target-1")).isTrue()
+
+        val firstCancel = processor.cancelTask("cancel-target-1")
+        val secondCancel = processor.cancelTask("cancel-target-1")
+        val unknownCancel = processor.cancelTask("unknown-task-id")
+        job!!.join()
+
+        assertThat(firstCancel).isTrue()
+        assertThat(secondCancel).isFalse()
+        assertThat(unknownCancel).isFalse()
+        assertThat(job.isCancelled).isTrue()
+        assertThat(activeJobs).isEmpty()
+        assertThat(reports).isEmpty()
+        assertThat(ledger.ledgerSnapshot.value.tasksFailedCount).isEqualTo(0)
+    }
+
+    @Test
+    fun testApplySyncResponse_cancelsTasksEvenWhenThermallyThrottled(): Unit = runTest {
+        val started = CompletableDeferred<Unit>()
+        val neverCompletes = CompletableDeferred<TaskExecutionResult>()
+        val engine = object : ComputeEngine {
+            override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+                started.complete(Unit)
+                return neverCompletes.await()
+            }
+        }
+        val ledger = InMemoryTaskLedgerRepository()
+        val activeJobs = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+        val processor = WifiSyncTaskProcessor(
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            ledgerRepository = ledger,
+            nodeId = "wifi-test-node",
+            activeJobs = activeJobs
+        )
+
+        val runningTask = TaskSpec.newBuilder()
+            .setTaskId("throttled-cancel-1")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom(byteArrayOf(0x00, 0x61, 0x73, 0x6D)))
+            .build()
+        val newTask = TaskSpec.newBuilder()
+            .setTaskId("throttled-skip-2")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom(byteArrayOf(0x00, 0x61, 0x73, 0x6D)))
+            .build()
+
+        val runningJob = processor.launchTaskIfEligible(this, runningTask)!!
+        started.await()
+
+        val response = com.androgrid.v1.SyncNodeStateResponse.newBuilder()
+            .addCancelTaskIds("throttled-cancel-1")
+            .addDesiredTasks(newTask)
+            .build()
+
+        processor.applySyncResponse(this, response, isThrottled = true)
+        runningJob.join()
+
+        assertThat(runningJob.isCancelled).isTrue()
+        assertThat(activeJobs.containsKey("throttled-skip-2")).isFalse()
+    }
 }

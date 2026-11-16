@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.androgrid.worker.AndroGridApplication
@@ -18,6 +19,7 @@ import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.NetworkTransportType
 import com.androgrid.v1.RegisterNodeRequest
 import com.androgrid.v1.SyncNodeStateRequest
+import com.androgrid.v1.SyncNodeStateResponse
 import com.androgrid.v1.TaskExecutionReport
 import com.androgrid.v1.TaskState
 import com.androgrid.worker.capability.AndroidBatteryStatusProvider
@@ -43,6 +45,7 @@ import com.androgrid.worker.telemetry.TaskLedgerStatus
 import com.androgrid.worker.telemetry.ThermalSafetyGuard
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -78,6 +81,7 @@ class WorkerForegroundService : Service() {
          * Traces to: [REQ-OP-002]
          */
         const val SYNC_INTERVAL_MS: Long = 2000L
+        private const val TAG: String = "WorkerForegroundService"
     }
 
     private val serviceJob = SupervisorJob()
@@ -87,6 +91,7 @@ class WorkerForegroundService : Service() {
     private var wifiClient: WifiSyncClient? = null
     private val completedReports = ConcurrentLinkedQueue<TaskExecutionReport>()
     private val inFlightTasks = ConcurrentHashMap.newKeySet<String>()
+    internal val activeJobs = ConcurrentHashMap<String, Job>()
 
     private fun resolveLedgerRepository(): TaskLedgerRepository {
         return (applicationContext as? AndroGridApplication)?.taskLedgerRepository
@@ -126,6 +131,29 @@ class WorkerForegroundService : Service() {
         super.onDestroy()
         stopSyncLoop()
         serviceJob.cancel()
+    }
+
+    /**
+     * Handles Android 14+ (API 34+) `dataSync` foreground service timeout preemption ([REQ-VER-001]).
+     * Cancels active compute jobs and stops the service cleanly before the OS raises an exception.
+     */
+    override fun onTimeout(startId: Int) {
+        super.onTimeout(startId)
+        handleServiceTimeout(startId)
+    }
+
+    /**
+     * Gracefully cancels active compute tasks, updates the service notification, and stops the service.
+     *
+     * @param startId Android service start ID passed to [stopSelf].
+     */
+    internal fun handleServiceTimeout(startId: Int) {
+        Log.w(TAG, "Foreground service dataSync timeout reached (startId=$startId); stopping cleanly")
+        updateNotification("Foreground service timeout reached; stopping cleanly")
+        stopSyncLoop()
+        activeJobs.values.forEach { it.cancel() }
+        activeJobs.clear()
+        stopSelf(startId)
     }
 
     private fun startForegroundWithTypedNotification() {
@@ -314,28 +342,29 @@ class WorkerForegroundService : Service() {
                             }
 
                             val effectiveSyncResult = syncResult ?: activeClientRef.get()!!.syncNodeState(syncRequest)
-                            if (effectiveSyncResult.isSuccess && !isThrottled) {
+                            if (effectiveSyncResult.isSuccess) {
                                 val response = effectiveSyncResult.getOrNull()
-                                val taskProcessor = WifiSyncTaskProcessor(
-                                    dispatcher = dispatcher,
-                                    ledgerRepository = ledgerRepository,
-                                    inFlightTasks = inFlightTasks,
-                                    completedReports = completedReports,
-                                    artifactResolver = artifactResolver,
-                                    nodeId = nodeId,
-                                    fetchArtifactRpc = { req ->
-                                        val genAlias = activeAliasRef.get()
-                                        val clientForFetch = activeClientRef.get()!!
-                                        lifecycleManager.acquireGeneration(genAlias)
-                                        try {
-                                            clientForFetch.fetchArtifact(req)
-                                        } finally {
-                                            lifecycleManager.releaseGeneration(genAlias)
+                                if (response != null) {
+                                    val taskProcessor = WifiSyncTaskProcessor(
+                                        dispatcher = dispatcher,
+                                        ledgerRepository = ledgerRepository,
+                                        inFlightTasks = inFlightTasks,
+                                        completedReports = completedReports,
+                                        artifactResolver = artifactResolver,
+                                        nodeId = nodeId,
+                                        activeJobs = activeJobs,
+                                        fetchArtifactRpc = { req ->
+                                            val genAlias = activeAliasRef.get()
+                                            val clientForFetch = activeClientRef.get()!!
+                                            lifecycleManager.acquireGeneration(genAlias)
+                                            try {
+                                                clientForFetch.fetchArtifact(req)
+                                            } finally {
+                                                lifecycleManager.releaseGeneration(genAlias)
+                                            }
                                         }
-                                    }
-                                )
-                                response?.desiredTasksList?.forEach { desiredTask ->
-                                    taskProcessor.launchTaskIfEligible(this, desiredTask)
+                                    )
+                                    taskProcessor.applySyncResponse(this, response, isThrottled)
                                 }
                             }
 
@@ -407,8 +436,45 @@ internal class WifiSyncTaskProcessor(
     private val completedReports: ConcurrentLinkedQueue<TaskExecutionReport> = ConcurrentLinkedQueue(),
     private val artifactResolver: ArtifactResolver = ArtifactResolver(),
     private val nodeId: String,
+    private val activeJobs: ConcurrentHashMap<String, Job> = ConcurrentHashMap(),
     private val fetchArtifactRpc: (suspend (FetchArtifactRequest) -> FetchArtifactResponse)? = null
 ) {
+    /**
+     * Cancels an active in-flight task by [taskId] if present in [activeJobs].
+     *
+     * @param taskId unique orchestrator task identifier.
+     * @return `true` if a running job was cancelled, `false` if no active job matched.
+     */
+    fun cancelTask(taskId: String): Boolean {
+        val job = activeJobs.remove(taskId) ?: return false
+        job.cancel()
+        return true
+    }
+
+    /**
+     * Applies cancellation directives and eligible task launches from [response].
+     * Processes `cancel_task_ids` before `desired_tasks` and regardless of thermal throttling
+     * so cancelled tasks terminate promptly.
+     *
+     * @param scope coroutine scope for launching eligible tasks.
+     * @param response orchestrator `SyncNodeStateResponse` payload.
+     * @param isThrottled whether the worker is currently thermally throttled.
+     */
+    suspend fun applySyncResponse(
+        scope: CoroutineScope,
+        response: SyncNodeStateResponse,
+        isThrottled: Boolean
+    ) {
+        response.cancelTaskIdsList.forEach { taskId ->
+            cancelTask(taskId)
+        }
+        if (!isThrottled) {
+            response.desiredTasksList.forEach { desiredTask ->
+                launchTaskIfEligible(scope, desiredTask)
+            }
+        }
+    }
+
     /**
      * Checks ledger/in-flight eligibility for [desiredTask] and, if eligible, launches execution
      * in [scope]. Resolves content-addressed artifacts over the persistent gRPC channel before
@@ -426,7 +492,8 @@ internal class WifiSyncTaskProcessor(
         if (!inFlightTasks.add(attemptKey)) {
             return null
         }
-        return scope.launch {
+        lateinit var launchedJob: Job
+        launchedJob = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val resolvedTask = when (
                     val resolution = artifactResolver.resolve(desiredTask, nodeId) { req ->
@@ -505,7 +572,11 @@ internal class WifiSyncTaskProcessor(
                 throw e
             } finally {
                 inFlightTasks.remove(attemptKey)
+                activeJobs.remove(desiredTask.taskId, launchedJob)
             }
         }
+        activeJobs.put(desiredTask.taskId, launchedJob)?.cancel()
+        launchedJob.start()
+        return launchedJob
     }
 }
