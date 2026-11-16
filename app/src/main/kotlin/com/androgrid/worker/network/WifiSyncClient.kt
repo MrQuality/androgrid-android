@@ -5,6 +5,8 @@ import com.androgrid.v1.FetchArtifactRequest
 import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.RegisterNodeRequest
 import com.androgrid.v1.RegisterNodeResponse
+import com.androgrid.v1.RenewCertificateRequest
+import com.androgrid.v1.RenewCertificateResponse
 import com.androgrid.v1.SyncNodeStateRequest
 import com.androgrid.v1.SyncNodeStateResponse
 import com.androgrid.worker.contract.ContractConstants
@@ -44,6 +46,17 @@ interface WifiRpcInvoker {
         channel: ManagedChannel,
         request: FetchArtifactRequest
     ): FetchArtifactResponse
+
+    /**
+     * Executes RenewCertificate RPC over the authenticated mTLS Wi-Fi channel.
+     */
+    suspend fun invokeRenewCertificate(
+        channel: ManagedChannel,
+        request: RenewCertificateRequest
+    ): RenewCertificateResponse {
+        val stub = AndroGridServiceGrpcKt.AndroGridServiceCoroutineStub(channel)
+        return stub.renewCertificate(request)
+    }
 }
 
 /**
@@ -146,6 +159,20 @@ class WifiSyncClient(
      */
     suspend fun fetchArtifact(request: FetchArtifactRequest): FetchArtifactResponse {
         return rpcInvoker.invokeFetchArtifact(channel, request)
+    }
+
+    /**
+     * Invokes RenewCertificate over the authenticated mTLS Wi-Fi channel.
+     *
+     * Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+     */
+    suspend fun renewCertificate(request: RenewCertificateRequest): Result<RenewCertificateResponse> {
+        return try {
+            val response = rpcInvoker.invokeRenewCertificate(channel, request)
+            Result.success(response)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
     }
 
     /**

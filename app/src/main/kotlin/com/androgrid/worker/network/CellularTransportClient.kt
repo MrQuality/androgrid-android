@@ -5,6 +5,8 @@ import com.androgrid.v1.ClaimCellularTaskRequest
 import com.androgrid.v1.ClaimCellularTaskResponse
 import com.androgrid.v1.FetchArtifactRequest
 import com.androgrid.v1.FetchArtifactResponse
+import com.androgrid.v1.RenewCertificateRequest
+import com.androgrid.v1.RenewCertificateResponse
 import com.androgrid.v1.SubmitCellularResultRequest
 import com.androgrid.v1.SubmitCellularResultResponse
 import com.androgrid.v1.TaskSpec
@@ -46,6 +48,17 @@ interface CellularRpcInvoker {
         channel: ManagedChannel,
         request: FetchArtifactRequest
     ): FetchArtifactResponse
+
+    /**
+     * Executes unary RenewCertificate RPC over the authenticated mTLS channel.
+     */
+    suspend fun invokeRenewCertificate(
+        channel: ManagedChannel,
+        request: RenewCertificateRequest
+    ): RenewCertificateResponse {
+        val stub = AndroGridServiceGrpcKt.AndroGridServiceCoroutineStub(channel)
+        return stub.renewCertificate(request)
+    }
 }
 
 /**
@@ -265,6 +278,38 @@ class CellularTransportClient(
     ): Result<SubmitCellularResultResponse> {
         return try {
             val response = rpcInvoker.invokeSubmit(channel, request)
+            Result.success(response)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        } finally {
+            teardownChannelForRadioSleep(channel)
+        }
+    }
+
+    /**
+     * Performs in-band mTLS certificate renewal over an ephemeral cellular channel
+     * and immediately tears down the socket for RRC radio sleep ([INV-003], [NFR-POW-001]).
+     *
+     * Traces to: [INV-002], [INV-003], [NFR-POW-001], [NFR-SEC-001], [REQ-OP-005]
+     */
+    suspend fun renewCertificate(request: RenewCertificateRequest): Result<RenewCertificateResponse> {
+        val channel = try {
+            createChannel()
+        } catch (e: Throwable) {
+            return Result.failure(e)
+        }
+        return renewCertificateWithChannel(channel, request)
+    }
+
+    /**
+     * Executes [RenewCertificateRequest] over a provided [ManagedChannel] and tears it down.
+     */
+    suspend fun renewCertificateWithChannel(
+        channel: ManagedChannel,
+        request: RenewCertificateRequest
+    ): Result<RenewCertificateResponse> {
+        return try {
+            val response = rpcInvoker.invokeRenewCertificate(channel, request)
             Result.success(response)
         } catch (e: Throwable) {
             Result.failure(e)
