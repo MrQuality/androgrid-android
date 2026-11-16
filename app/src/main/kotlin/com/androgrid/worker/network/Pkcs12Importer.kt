@@ -7,15 +7,17 @@ import java.security.PrivateKey
 import java.security.UnrecoverableKeyException
 import java.security.cert.X509Certificate
 import java.util.Base64
+import javax.crypto.AEADBadTagException
+import javax.crypto.BadPaddingException
 
 /**
  * Extracted PEM credentials from a PKCS#12 (.p12) bundle.
  *
  * Traces to: `[INV-002]`, `[NFR-SEC-001]`, `[REQ-OP-001]`
  *
- * @property clientCertPem PEM-encoded X.509 client leaf certificate (or chain).
+ * @property clientCertPem PEM-encoded X.509 client leaf certificate and any non-self-signed intermediates.
  * @property clientKeyPem PKCS#8 PEM-encoded client private key.
- * @property caCertPem Optional PEM-encoded issuing CA certificate when present in the bundle.
+ * @property caCertPem Optional PEM-encoded self-signed root CA certificate(s) when present in the bundle.
  */
 data class Pkcs12Credentials(
     val clientCertPem: String,
@@ -45,20 +47,27 @@ object Pkcs12Importer {
     private val mimeEncoder: Base64.Encoder =
         Base64.getMimeEncoder(64, byteArrayOf('\n'.code.toByte()))
 
+    private val bcProvider: BouncyCastleProvider by lazy { BouncyCastleProvider() }
+
     /**
-     * Parses raw `.p12` bytes using [password], trying the platform PKCS12 provider first and
-     * falling back to BouncyCastle when the platform provider rejects modern OpenSSL 3.x ciphers.
+     * Parses raw `.p12` bytes using [password], trying [primaryLoader] first and falling back
+     * to BouncyCastle when the platform provider rejects modern OpenSSL 3.x ciphers.
      *
      * @param bytes Raw PKCS#12 file bytes.
      * @param password Bundle passphrase (defaults to empty for passwordless `.p12` exports).
+     * @param primaryLoader Testable primary KeyStore loader (defaults to platform `"PKCS12"`).
      * @return [Pkcs12ImportResult] describing extracted credentials, password prompt need, or error.
      */
-    fun import(bytes: ByteArray, password: CharArray = charArrayOf()): Pkcs12ImportResult {
+    internal fun import(
+        bytes: ByteArray,
+        password: CharArray = charArrayOf(),
+        primaryLoader: (ByteArray, CharArray) -> KeyStore = ::loadPlatformPkcs12
+    ): Pkcs12ImportResult {
         if (bytes.isEmpty()) {
             return Pkcs12ImportResult.Failure("PKCS#12 file is empty.")
         }
 
-        val loadResult = loadKeyStoreWithFallback(bytes, password)
+        val loadResult = loadKeyStoreWithFallback(bytes, password, primaryLoader)
         val ks = loadResult.getOrElse { err ->
             return if (isPasswordOrMacError(err)) {
                 Pkcs12ImportResult.PasswordRequired(
@@ -75,18 +84,35 @@ object Pkcs12Importer {
         return extractCredentials(ks, password)
     }
 
-    private fun loadKeyStoreWithFallback(bytes: ByteArray, password: CharArray): Result<KeyStore> {
+    /**
+     * Public entry point for parsing `.p12` bytes with the default platform-to-BouncyCastle fallback.
+     *
+     * @param bytes Raw PKCS#12 file bytes.
+     * @param password Bundle passphrase (defaults to empty).
+     * @return [Pkcs12ImportResult] describing extracted credentials, password prompt need, or error.
+     */
+    fun import(bytes: ByteArray, password: CharArray = charArrayOf()): Pkcs12ImportResult {
+        return import(bytes, password, ::loadPlatformPkcs12)
+    }
+
+    /**
+     * Loads a PKCS#12 [KeyStore], trying [primaryLoader] first and falling back to BouncyCastle.
+     *
+     * Traces to: `[INV-002]`, `[NFR-SEC-001]`
+     */
+    internal fun loadKeyStoreWithFallback(
+        bytes: ByteArray,
+        password: CharArray,
+        primaryLoader: (ByteArray, CharArray) -> KeyStore = ::loadPlatformPkcs12
+    ): Result<KeyStore> {
         val platformErr = try {
-            val ks = KeyStore.getInstance("PKCS12").apply {
-                load(ByteArrayInputStream(bytes), password)
-            }
-            return Result.success(ks)
+            return Result.success(primaryLoader(bytes, password))
         } catch (e: Exception) {
             e
         }
 
         return try {
-            val ks = KeyStore.getInstance("PKCS12", BouncyCastleProvider()).apply {
+            val ks = KeyStore.getInstance("PKCS12", bcProvider).apply {
                 load(ByteArrayInputStream(bytes), password)
             }
             Result.success(ks)
@@ -96,14 +122,25 @@ object Pkcs12Importer {
         }
     }
 
+    private fun loadPlatformPkcs12(bytes: ByteArray, password: CharArray): KeyStore {
+        return KeyStore.getInstance("PKCS12").apply {
+            load(ByteArrayInputStream(bytes), password)
+        }
+    }
+
     private fun extractCredentials(ks: KeyStore, password: CharArray): Pkcs12ImportResult {
         val aliases = ks.aliases().toList()
         if (aliases.isEmpty()) {
             return Pkcs12ImportResult.Failure("PKCS#12 bundle contains no certificate or key entries.")
         }
 
-        val keyAlias = aliases.firstOrNull { ks.isKeyEntry(it) }
-            ?: return Pkcs12ImportResult.Failure("PKCS#12 bundle contains no private key entry.")
+        val keyAlias = aliases.firstOrNull {
+            try {
+                ks.entryInstanceOf(it, KeyStore.PrivateKeyEntry::class.java)
+            } catch (_: Exception) {
+                ks.isKeyEntry(it)
+            }
+        } ?: return Pkcs12ImportResult.Failure("PKCS#12 bundle contains no private key entry.")
 
         val key = try {
             ks.getKey(keyAlias, password) as? PrivateKey
@@ -128,36 +165,50 @@ object Pkcs12Importer {
             return Pkcs12ImportResult.Failure("Alias '$keyAlias' has no X.509 certificate.")
         }
 
-        val leafCertPem = toPem("CERTIFICATE", chain.first().encoded)
+        // Keep leaf + non-self-signed intermediates in clientCertPem; route self-signed roots to caCertPem.
+        val leaf = chain.first()
+        val intermediates = chain.drop(1).filter { !isSelfSigned(it) }
+        val clientChainPem = (listOf(leaf) + intermediates)
+            .joinToString("\n") { toPem("CERTIFICATE", it.encoded) }
+
         val keyPem = toPem("PRIVATE KEY", keyEncoded)
 
-        val caCerts = mutableListOf<X509Certificate>()
-        if (chain.size > 1) {
-            caCerts.addAll(chain.drop(1))
-        } else {
-            aliases.filter { ks.isCertificateEntry(it) }.forEach { caAlias ->
-                (ks.getCertificate(caAlias) as? X509Certificate)?.let { caCerts.add(it) }
+        val rootCerts = chain.drop(1).filter { isSelfSigned(it) }.toMutableList()
+        aliases.filter { ks.isCertificateEntry(it) }.forEach { caAlias ->
+            (ks.getCertificate(caAlias) as? X509Certificate)?.let { cert ->
+                if (!rootCerts.any { it.encoded.contentEquals(cert.encoded) }) {
+                    rootCerts.add(cert)
+                }
             }
         }
-        val caPem = if (caCerts.isNotEmpty()) {
-            caCerts.joinToString("\n") { toPem("CERTIFICATE", it.encoded) }
+        val caPem = if (rootCerts.isNotEmpty()) {
+            rootCerts.joinToString("\n") { toPem("CERTIFICATE", it.encoded) }
         } else {
             null
         }
 
         return Pkcs12ImportResult.Success(
             Pkcs12Credentials(
-                clientCertPem = leafCertPem,
+                clientCertPem = clientChainPem,
                 clientKeyPem = keyPem,
                 caCertPem = caPem
             )
         )
     }
 
-    private fun isPasswordOrMacError(err: Throwable): Boolean {
+    private fun isSelfSigned(cert: X509Certificate): Boolean {
+        return cert.subjectX500Principal == cert.issuerX500Principal
+    }
+
+    internal fun isPasswordOrMacError(err: Throwable): Boolean {
         var cur: Throwable? = err
         while (cur != null) {
-            if (cur is UnrecoverableKeyException) return true
+            if (cur is UnrecoverableKeyException ||
+                cur is BadPaddingException ||
+                cur is AEADBadTagException
+            ) {
+                return true
+            }
             val msg = cur.message?.lowercase().orEmpty()
             if (msg.contains("wrong password") ||
                 msg.contains("mac invalid") ||

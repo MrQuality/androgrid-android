@@ -191,10 +191,8 @@ object DefaultMtlsSocketFactoryProvider : MtlsSocketFactoryProvider {
             trustStore.setCertificateEntry("androgrid-ca-$index", cert)
         }
 
-        // 2. Load PKCS#12 Client KeyStore
-        val clientStore = KeyStore.getInstance("PKCS12").apply {
-            load(ByteArrayInputStream(p12Bytes), password)
-        }
+        // 2. Load PKCS#12 Client KeyStore (with BouncyCastle fallback for OpenSSL 3.x PBES2)
+        val clientStore = Pkcs12Importer.loadKeyStoreWithFallback(p12Bytes, password).getOrThrow()
 
         // 3. Initialize KeyManagerFactory and TrustManagerFactory
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
