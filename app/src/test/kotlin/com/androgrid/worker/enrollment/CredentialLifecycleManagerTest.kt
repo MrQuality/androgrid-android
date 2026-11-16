@@ -382,11 +382,126 @@ class CredentialLifecycleManagerTest {
         WorkManagerTestInitHelper.initializeTestWorkManager(context, config)
 
         CertificateRenewalWorker.schedule(context, 60_000L)
+        // Calling schedule again with a new delay must update (not silently keep)
+        CertificateRenewalWorker.schedule(context, 120_000L)
         val workInfos = WorkManager.getInstance(context)
             .getWorkInfosForUniqueWork(CertificateRenewalWorker.WORK_NAME)
             .get()
         assertThat(workInfos).hasSize(1)
         assertThat(workInfos[0].state).isEqualTo(WorkInfo.State.ENQUEUED)
         assertThat(workInfos[0].constraints.requiredNetworkType).isEqualTo(NetworkType.CONNECTED)
+    }
+
+    @Test
+    fun `rejects CN prefix spoofing such as worker-10 for worker-1`() = runTest {
+        val keyProvider = SoftwareKeyEnrollmentProvider()
+        val kp = keyProvider.generateKeyPair("test-alias")
+        val spoofedCert = signWorkerCert(kp.public, cn = "worker-10", daysValid = 365L)
+
+        val err = CredentialLifecycleManager.validateIssuedCertificate(
+            clientCertPem = spoofedCert,
+            existingCaPem = caCertPem,
+            expectedNodeId = "worker-1",
+            expectedSpkiDer = kp.public.encoded,
+            nowMs = System.currentTimeMillis()
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("CN mismatch")
+    }
+
+    @Test
+    fun `resumes CANDIDATE_VERIFYING without re-signing and preserves on transient trial failure`() = runTest {
+        val keyProvider = SoftwareKeyEnrollmentProvider()
+        val oldAlias = AndroidKeyStoreEnrollmentProvider.DEFAULT_ENROLLMENT_ALIAS
+        val oldKp = keyProvider.generateKeyPair(oldAlias)
+        val oldCert = signWorkerCert(oldKp.public, "worker-01", daysValid = 10L)
+        keyProvider.installCertificateChain(oldAlias, oldCert, caCertPem)
+
+        val stagingAlias = "${oldAlias}_staging"
+        val stagingKp = keyProvider.generateKeyPair(stagingAlias)
+        val candidateCert = signWorkerCert(stagingKp.public, "worker-01", daysValid = 365L)
+        keyProvider.installCertificateChain(stagingAlias, candidateCert, caCertPem)
+
+        val fixedNowMs = System.currentTimeMillis()
+        val repo = InMemoryClusterSettingsRepository(
+            ClusterSettings(caCertPem = caCertPem, clientCertPem = oldCert, clientKeyPem = "keystore:$oldAlias")
+        )
+        repo.commitSettingsAndLifecycle(
+            repo.getSettings(),
+            CredentialLifecycleRecord(
+                state = CredentialLifecycleState.CANDIDATE_VERIFYING,
+                activeAlias = oldAlias,
+                stagingAlias = stagingAlias,
+                candidateCertPem = candidateCert
+            )
+        )
+
+        var currentNowMs = fixedNowMs
+        val manager = CredentialLifecycleManager(
+            settingsRepository = repo,
+            keyProvider = keyProvider,
+            clockMs = { currentNowMs }
+        )
+
+        // First trial fails transiently -> MUST preserve CANDIDATE_VERIFYING & stagingAlias
+        val transientFail = manager.renewIfDue(
+            nodeId = "worker-01",
+            renewRpc = { error("Must not call RenewCertificate when resuming CANDIDATE_VERIFYING") },
+            trialCandidateRpc = { _, _ -> Result.failure<String>(RuntimeException("transient timeout")) }
+        )
+        assertThat(transientFail).isInstanceOf(RenewalOutcome.Failed::class.java)
+        assertThat(repo.getLifecycleRecord().state).isEqualTo(CredentialLifecycleState.CANDIDATE_VERIFYING)
+        assertThat(keyProvider.isEnrolled(stagingAlias)).isTrue()
+
+        // Advance past backoff -> retries trial directly without RenewCertificate and succeeds
+        currentNowMs += 120_000L
+        val resumedSuccess = manager.renewIfDue(
+            nodeId = "worker-01",
+            renewRpc = { error("Must not call RenewCertificate when resuming CANDIDATE_VERIFYING") },
+            trialCandidateRpc = { alias, _ ->
+                assertThat(alias).isEqualTo(stagingAlias)
+                Result.success("ok")
+            }
+        )
+        assertThat(resumedSuccess).isInstanceOf(RenewalOutcome.Renewed::class.java)
+        assertThat(repo.getSettings().clientKeyPem).isEqualTo("keystore:$stagingAlias")
+    }
+
+    @Test
+    fun `validation failure abort sets backoff instead of zeroing consecutiveFailures`() = runTest {
+        val keyProvider = SoftwareKeyEnrollmentProvider()
+        val oldAlias = AndroidKeyStoreEnrollmentProvider.DEFAULT_ENROLLMENT_ALIAS
+        val oldKp = keyProvider.generateKeyPair(oldAlias)
+        val oldCert = signWorkerCert(oldKp.public, "worker-01", daysValid = 10L)
+        keyProvider.installCertificateChain(oldAlias, oldCert, caCertPem)
+
+        val repo = InMemoryClusterSettingsRepository(
+            ClusterSettings(caCertPem = caCertPem, clientCertPem = oldCert, clientKeyPem = "keystore:$oldAlias")
+        )
+        val fixedNowMs = System.currentTimeMillis()
+        val manager = CredentialLifecycleManager(
+            settingsRepository = repo,
+            keyProvider = keyProvider,
+            clockMs = { fixedNowMs }
+        )
+
+        val outcome = manager.renewIfDue(
+            nodeId = "worker-01",
+            renewRpc = { req ->
+                val newPub = extractPublicKeyFromCsr(req.csrPem)
+                // Missing ClientAuth EKU -> fails Step 3 validation
+                val badCert = signWorkerCert(newPub, "worker-01", includeClientAuth = false)
+                Result.success(
+                    RenewCertificateResponse.newBuilder()
+                        .setClientCertPem(badCert)
+                        .setCaCertPem(caCertPem)
+                        .build()
+                )
+            },
+            trialCandidateRpc = { _, _ -> Result.success(Unit) }
+        )
+        assertThat(outcome).isInstanceOf(RenewalOutcome.Failed::class.java)
+        assertThat(repo.getLifecycleRecord().consecutiveFailures).isEqualTo(1)
+        assertThat(repo.getLifecycleRecord().nextEligibleRenewalEpochSeconds).isGreaterThan(fixedNowMs / 1000L)
     }
 }
