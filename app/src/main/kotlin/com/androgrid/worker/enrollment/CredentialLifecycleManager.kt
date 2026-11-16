@@ -630,7 +630,7 @@ class CredentialLifecycleManager(
                 return "Issued certificate missing ClientAuth ExtendedKeyUsage"
             }
 
-            val x500Name = X500Name(leaf.subjectX500Principal.encoded)
+            val x500Name = X500Name.getInstance(leaf.subjectX500Principal.encoded)
             val cnValues = x500Name.getRDNs(BCStyle.CN).flatMap { rdn ->
                 rdn.typesAndValues.map { IETFUtils.valueToString(it.value) }
             }

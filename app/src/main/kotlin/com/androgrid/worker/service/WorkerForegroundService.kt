@@ -297,8 +297,10 @@ class WorkerForegroundService : Service() {
                                 )
                                 if (renewalOutcome is RenewalOutcome.Renewed<*>) {
                                     @Suppress("UNCHECKED_CAST")
-                                    val (candidateClient, trialResp) =
+                                    val pair =
                                         renewalOutcome.trialResult as Pair<WifiSyncClient, com.androgrid.v1.SyncNodeStateResponse>
+                                    val candidateClient = pair.first
+                                    val trialResp = pair.second
                                     lifecycleManager.acquireGeneration(renewalOutcome.newAlias)
                                     activeClientRef.set(candidateClient)
                                     activeAliasRef.set(renewalOutcome.newAlias)

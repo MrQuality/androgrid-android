@@ -8,6 +8,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
@@ -186,9 +187,19 @@ class CertificateRenewalWorker(
                 )
                 .build()
 
-            WorkManager.getInstance(context).enqueueUniqueWork(
+            val wm = WorkManager.getInstance(context)
+            val isRunning = runCatching {
+                wm.getWorkInfosForUniqueWork(WORK_NAME).get()
+                    .any { it.state == WorkInfo.State.RUNNING }
+            }.getOrDefault(false)
+            val policy = if (isRunning) {
+                ExistingWorkPolicy.APPEND_OR_REPLACE
+            } else {
+                ExistingWorkPolicy.REPLACE
+            }
+            wm.enqueueUniqueWork(
                 WORK_NAME,
-                ExistingWorkPolicy.UPDATE,
+                policy,
                 request
             )
         }
