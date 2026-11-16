@@ -15,6 +15,7 @@ import com.dylibso.chicory.wasm.WasmModule
 import com.dylibso.chicory.wasm.types.Instruction
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -37,7 +38,8 @@ import kotlin.coroutines.coroutineContext
  * Traces to: [INV-006], [REQ-VER-003], [NFR-PERF-001]
  */
 class WasmComputeEngine(
-    private val executionRunner: (suspend (ByteString, Map<String, String>) -> TaskExecutionResult)? = null
+    private val executionRunner: (suspend (ByteString, Map<String, String>) -> TaskExecutionResult)? = null,
+    private val computeDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) : ComputeEngine {
 
     private class WasmCancelledTrap : RuntimeException("WASM execution cancelled")
@@ -89,7 +91,7 @@ class WasmComputeEngine(
 
         return try {
             withTimeout(timeoutMillis) {
-                withContext(Dispatchers.Default) {
+                withContext(computeDispatcher) {
                     val executionJob = coroutineContext[Job]
                     try {
                         if (executionRunner != null) {
@@ -185,10 +187,13 @@ class WasmComputeEngine(
 
         val cancelled = AtomicBoolean(false)
         val workerThread = AtomicReference<Thread?>(null)
+        val interruptLock = Any()
         val completionHandle = executionJob?.invokeOnCompletion { cause ->
             if (cause != null) {
-                cancelled.set(true)
-                workerThread.get()?.interrupt()
+                synchronized(interruptLock) {
+                    cancelled.set(true)
+                    workerThread.get()?.interrupt()
+                }
             }
         }
         try {
@@ -319,10 +324,12 @@ class WasmComputeEngine(
                 }
             }
         } finally {
-            workerThread.set(null)
+            synchronized(interruptLock) {
+                workerThread.set(null)
+                // Clear any interrupt flag left on the shared worker thread under the same lock
+                Thread.interrupted()
+            }
             completionHandle?.dispose()
-            // Clear any interrupt flag left on the shared Dispatchers.Default worker thread
-            Thread.interrupted()
         }
     }
 

@@ -378,7 +378,9 @@ class WasmComputeEngineTest {
 
     @Test
     fun testInfiniteLoop_cancelDoesNotPolluteThreadForNextTaskOnDispatchersDefault(): Unit = runBlocking {
-        val engine = WasmComputeEngine()
+        val singleThreadExecutor = Executors.newSingleThreadExecutor()
+        val pinnedDispatcher = singleThreadExecutor.asCoroutineDispatcher()
+        val engine = WasmComputeEngine(computeDispatcher = pinnedDispatcher)
         val cancelTask = TaskSpec.newBuilder()
             .setTaskId("task_wasm_cancel_reuse_1")
             .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
@@ -395,10 +397,6 @@ class WasmComputeEngineTest {
             .setWasmBytecode(ByteString.copyFrom(TestWasmBytecodeFixtures.FIBONACCI))
             .build()
 
-        // Cancel on Dispatchers.Default and also verify thread interrupt flag is cleared even when
-        // subsequent work runs on the same single-threaded dispatcher.
-        val singleThreadExecutor = Executors.newSingleThreadExecutor()
-        val pinnedDispatcher = singleThreadExecutor.asCoroutineDispatcher()
         try {
             val cancelJob = launch(pinnedDispatcher) {
                 engine.execute(cancelTask)
