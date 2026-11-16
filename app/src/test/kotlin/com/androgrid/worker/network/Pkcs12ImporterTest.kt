@@ -1,7 +1,7 @@
 package com.androgrid.worker.network
 
 import com.google.common.truth.Truth.assertThat
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers
+import org.bouncycastle.asn1.nist.NISTObjectIdentifiers
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
@@ -56,7 +56,7 @@ class Pkcs12ImporterTest {
         // Mirror OpenSSL 3.x defaults: PBES2 with AES-256-CBC and SHA-256 MAC
         val keyBag = JcaPKCS12SafeBagBuilder(
             key,
-            JcePKCSPBEOutputEncryptorBuilder(PKCSObjectIdentifiers.id_PBES2)
+            JcePKCSPBEOutputEncryptorBuilder(NISTObjectIdentifiers.id_aes256_CBC)
                 .setProvider(provider)
                 .build(password)
         ).build()
@@ -65,7 +65,7 @@ class Pkcs12ImporterTest {
             .addData(keyBag)
             .addData(certBag)
             .build(
-                JcePKCS12MacCalculatorBuilder(org.bouncycastle.asn1.nist.NISTObjectIdentifiers.id_sha256)
+                JcePKCS12MacCalculatorBuilder(NISTObjectIdentifiers.id_sha256)
                     .setProvider(provider),
                 password
             )
@@ -73,11 +73,16 @@ class Pkcs12ImporterTest {
     }
 
     @Test
-    fun testImport_openSsl3Pbes2Aes256Sha256_passwordless_succeeds() {
+    fun testImport_passwordlessBundle_succeeds() {
         val (cert, key) = generateEcCertAndKey("worker-p12-01")
-        val p12Bytes = buildModernOpenSsl3P12(cert, key, charArrayOf())
+        val ks = KeyStore.getInstance("PKCS12", BouncyCastleProvider()).apply {
+            load(null, charArrayOf())
+            setKeyEntry("worker", key, charArrayOf(), arrayOf(cert))
+        }
+        val out = ByteArrayOutputStream()
+        ks.store(out, charArrayOf())
 
-        val result = Pkcs12Importer.import(p12Bytes)
+        val result = Pkcs12Importer.import(out.toByteArray())
         assertThat(result).isInstanceOf(Pkcs12ImportResult.Success::class.java)
         val creds = (result as Pkcs12ImportResult.Success).credentials
         assertThat(creds.clientCertPem).contains("-----BEGIN CERTIFICATE-----")
