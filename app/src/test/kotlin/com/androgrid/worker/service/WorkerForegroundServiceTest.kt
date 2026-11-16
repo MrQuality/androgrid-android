@@ -349,4 +349,41 @@ class WorkerForegroundServiceTest {
         assertThat(runningJob.isCancelled).isTrue()
         assertThat(activeJobs.containsKey("throttled-skip-2")).isFalse()
     }
+
+    @Test
+    fun testWifiSyncTaskProcessor_cancelledScopeBeforeStart_doesNotLeakInFlightOrActiveJobs(): Unit = runTest {
+        val engine = object : ComputeEngine {
+            override suspend fun execute(task: TaskSpec): TaskExecutionResult {
+                return TaskExecutionResult(
+                    exitCode = 0,
+                    stdoutBytes = ByteArray(0),
+                    stderrBytes = ByteArray(0)
+                )
+            }
+        }
+        val ledger = InMemoryTaskLedgerRepository()
+        val inFlight = ConcurrentHashMap.newKeySet<String>()
+        val activeJobs = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+        val processor = WifiSyncTaskProcessor(
+            dispatcher = TaskExecutionDispatcher(wasmEngine = engine),
+            ledgerRepository = ledger,
+            inFlightTasks = inFlight,
+            nodeId = "wifi-test-node",
+            activeJobs = activeJobs
+        )
+
+        val cancelledScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() })
+        val task = TaskSpec.newBuilder()
+            .setTaskId("pre-cancelled-task")
+            .setRunAttempt(1)
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setWasmBytecode(ByteString.copyFrom(byteArrayOf(0x00, 0x61, 0x73, 0x6D)))
+            .build()
+
+        val job = processor.launchTaskIfEligible(cancelledScope, task)
+        assertThat(job).isNotNull()
+        assertThat(job!!.isCancelled).isTrue()
+        assertThat(inFlight).isEmpty()
+        assertThat(activeJobs).isEmpty()
+    }
 }

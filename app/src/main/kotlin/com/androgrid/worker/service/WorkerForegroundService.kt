@@ -149,11 +149,11 @@ class WorkerForegroundService : Service() {
      */
     internal fun handleServiceTimeout(startId: Int) {
         Log.w(TAG, "Foreground service dataSync timeout reached (startId=$startId); stopping cleanly")
-        updateNotification("Foreground service timeout reached; stopping cleanly")
         stopSyncLoop()
         activeJobs.values.forEach { it.cancel() }
         activeJobs.clear()
-        stopSelf(startId)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun startForegroundWithTypedNotification() {
@@ -268,6 +268,28 @@ class WorkerForegroundService : Service() {
                             return@collectLatest
                         }
 
+                        val ledgerRepository = resolveLedgerRepository()
+                        val artifactResolver = app?.artifactResolver ?: ArtifactResolver()
+                        val taskProcessor = WifiSyncTaskProcessor(
+                            dispatcher = dispatcher,
+                            ledgerRepository = ledgerRepository,
+                            inFlightTasks = inFlightTasks,
+                            completedReports = completedReports,
+                            artifactResolver = artifactResolver,
+                            nodeId = nodeId,
+                            activeJobs = activeJobs,
+                            fetchArtifactRpc = { req ->
+                                val genAlias = activeAliasRef.get()
+                                val clientForFetch = activeClientRef.get()!!
+                                lifecycleManager.acquireGeneration(genAlias)
+                                try {
+                                    clientForFetch.fetchArtifact(req)
+                                } finally {
+                                    lifecycleManager.releaseGeneration(genAlias)
+                                }
+                            }
+                        )
+
                         // Step 2: 2.0-second declarative synchronization loop per [REQ-OP-002]
                         while (isActive) {
                             val currentBattery = batteryProvider.getBatteryStatus()
@@ -284,9 +306,6 @@ class WorkerForegroundService : Service() {
                                 .setSessionToken(sessionToken)
                                 .addAllCompletedTasks(reportsToSend)
                                 .build()
-
-                            val ledgerRepository = resolveLedgerRepository()
-                            val artifactResolver = app?.artifactResolver ?: ArtifactResolver()
 
                             // Check in-band certificate renewal without dropping session_token or active tasks
                             val currentSettings = settingsRepo.getSettings()
@@ -345,25 +364,6 @@ class WorkerForegroundService : Service() {
                             if (effectiveSyncResult.isSuccess) {
                                 val response = effectiveSyncResult.getOrNull()
                                 if (response != null) {
-                                    val taskProcessor = WifiSyncTaskProcessor(
-                                        dispatcher = dispatcher,
-                                        ledgerRepository = ledgerRepository,
-                                        inFlightTasks = inFlightTasks,
-                                        completedReports = completedReports,
-                                        artifactResolver = artifactResolver,
-                                        nodeId = nodeId,
-                                        activeJobs = activeJobs,
-                                        fetchArtifactRpc = { req ->
-                                            val genAlias = activeAliasRef.get()
-                                            val clientForFetch = activeClientRef.get()!!
-                                            lifecycleManager.acquireGeneration(genAlias)
-                                            try {
-                                                clientForFetch.fetchArtifact(req)
-                                            } finally {
-                                                lifecycleManager.releaseGeneration(genAlias)
-                                            }
-                                        }
-                                    )
                                     taskProcessor.applySyncResponse(this, response, isThrottled)
                                 }
                             }
@@ -576,7 +576,10 @@ internal class WifiSyncTaskProcessor(
             }
         }
         activeJobs.put(desiredTask.taskId, launchedJob)?.cancel()
-        launchedJob.start()
+        if (!launchedJob.start() && launchedJob.isCancelled) {
+            inFlightTasks.remove(attemptKey)
+            activeJobs.remove(desiredTask.taskId, launchedJob)
+        }
         return launchedJob
     }
 }

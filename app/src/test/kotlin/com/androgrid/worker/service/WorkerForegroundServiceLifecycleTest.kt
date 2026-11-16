@@ -43,5 +43,9 @@ class WorkerForegroundServiceLifecycleTest {
         assertThat(job.isCancelled).isTrue()
         assertThat(service.activeJobs).isEmpty()
         assertThat(Shadows.shadowOf(service).isStoppedBySelf).isTrue()
+
+        // Also verify handleServiceTimeout stops even when invoked with a stale startId
+        service.handleServiceTimeout(1)
+        assertThat(Shadows.shadowOf(service).isStoppedBySelf).isTrue()
     }
 }
