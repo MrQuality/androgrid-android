@@ -4,7 +4,12 @@ import com.androgrid.v1.ExecutionEngine
 import com.androgrid.v1.TaskSpec
 import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.ByteString
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import java.io.File
 import java.security.MessageDigest
@@ -301,5 +306,71 @@ class WasmComputeEngineTest {
         assertThat(leakedSoFiles).isEmpty()
 
         tempDir.deleteRecursively()
+    }
+
+    @Test
+    fun testInfiniteLoop_externalJobCancel_cancelsCooperativelyWithin500Ms(): Unit = runBlocking {
+        val engine = WasmComputeEngine()
+        val task = TaskSpec.newBuilder()
+            .setTaskId("task_wasm_cancel_coop")
+            .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+            .setTimeoutSeconds(60)
+            .setWasmBytecode(ByteString.copyFrom(TestWasmBytecodeFixtures.INFINITE_LOOP))
+            .build()
+
+        var caughtCancellation = false
+        val job = launch(Dispatchers.Default) {
+            try {
+                engine.execute(task)
+            } catch (e: CancellationException) {
+                caughtCancellation = true
+                throw e
+            }
+        }
+
+        delay(25)
+        val cancelStartMs = System.currentTimeMillis()
+        job.cancel()
+        withTimeout(1000L) {
+            job.join()
+        }
+        val elapsedMs = System.currentTimeMillis() - cancelStartMs
+
+        assertThat(job.isCancelled).isTrue()
+        assertThat(caughtCancellation).isTrue()
+        assertThat(elapsedMs).isLessThan(500L)
+
+        // Verify the Chicory interpreter thread actually exited rather than leaking in background
+        delay(50)
+        val activeChicoryThreads = Thread.getAllStackTraces().keys.count { thread ->
+            thread.isAlive && thread.stackTrace.any { it.className.startsWith("com.dylibso.chicory") }
+        }
+        assertThat(activeChicoryThreads).isEqualTo(0)
+    }
+
+    @Test
+    fun testInfiniteLoop_repeatedCancelCycles_completesRapidly(): Unit = runBlocking {
+        val engine = WasmComputeEngine()
+        repeat(5) { idx ->
+            val task = TaskSpec.newBuilder()
+                .setTaskId("task_wasm_cancel_cycle_$idx")
+                .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+                .setTimeoutSeconds(60)
+                .setWasmBytecode(ByteString.copyFrom(TestWasmBytecodeFixtures.INFINITE_LOOP))
+                .build()
+
+            val job = launch(Dispatchers.Default) {
+                engine.execute(task)
+            }
+            delay(15)
+            val cancelStartMs = System.currentTimeMillis()
+            job.cancel()
+            withTimeout(1000L) {
+                job.join()
+            }
+            val elapsedMs = System.currentTimeMillis() - cancelStartMs
+            assertThat(job.isCancelled).isTrue()
+            assertThat(elapsedMs).isLessThan(500L)
+        }
     }
 }

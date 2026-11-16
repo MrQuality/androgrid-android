@@ -1,8 +1,10 @@
 package com.androgrid.worker.engine
 
 import com.androgrid.v1.TaskSpec
+import com.dylibso.chicory.runtime.ExecutionListener
 import com.dylibso.chicory.runtime.ExportFunction
 import com.dylibso.chicory.runtime.Instance
+import com.dylibso.chicory.runtime.MStack
 import com.dylibso.chicory.runtime.Store
 import com.dylibso.chicory.runtime.WasmRuntimeException
 import com.dylibso.chicory.wasi.WasiExitException
@@ -10,13 +12,19 @@ import com.dylibso.chicory.wasi.WasiOptions
 import com.dylibso.chicory.wasi.WasiPreview1
 import com.dylibso.chicory.wasm.Parser
 import com.dylibso.chicory.wasm.WasmModule
+import com.dylibso.chicory.wasm.types.Instruction
 import com.google.protobuf.ByteString
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.coroutineContext
 
 /**
  * In-memory WebAssembly / WASI compute engine for isolated edge workloads.
@@ -31,6 +39,8 @@ import java.security.MessageDigest
 class WasmComputeEngine(
     private val executionRunner: (suspend (ByteString, Map<String, String>) -> TaskExecutionResult)? = null
 ) : ComputeEngine {
+
+    private class WasmCancelledTrap : RuntimeException("WASM execution cancelled")
 
     companion object {
         /**
@@ -68,40 +78,53 @@ class WasmComputeEngine(
             }
         }
 
-        // Step 3: Enforce execution timeout watchdog
+        // Step 3: Enforce execution timeout watchdog with structured cancellation
+        val callerJob = coroutineContext[Job]
+        if (callerJob?.isActive == false) {
+            throw CancellationException("WASM execution cancelled before start")
+        }
+
         val timeoutSeconds = if (task.timeoutSeconds > 0) task.timeoutSeconds.toLong() else 180L
         val timeoutMillis = timeoutSeconds * 1000L
 
-        val scope = CoroutineScope(Dispatchers.Default)
-        val deferred = scope.async {
-            try {
-                if (executionRunner != null) {
-                    executionRunner.invoke(task.wasmBytecode, task.envVarsMap)
-                } else {
-                    executeWasmInMemory(task.wasmBytecode, task.envVarsMap, task.entrypoint)
+        return try {
+            withTimeout(timeoutMillis) {
+                withContext(Dispatchers.Default) {
+                    val executionJob = coroutineContext[Job]
+                    try {
+                        if (executionRunner != null) {
+                            executionRunner.invoke(task.wasmBytecode, task.envVarsMap)
+                        } else {
+                            executeWasmInMemory(
+                                bytecode = task.wasmBytecode,
+                                envVars = task.envVarsMap,
+                                entrypoint = task.entrypoint,
+                                executionJob = executionJob
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (t: Throwable) {
+                        if (t is WasmCancelledTrap || t.cause is WasmCancelledTrap) {
+                            throw CancellationException("WASM execution cancelled", t)
+                        }
+                        TaskExecutionResult.failure(
+                            exitCode = -1,
+                            errorCode = "WASM_TRAP",
+                            errorMessage = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
+                        )
+                    }
                 }
-            } catch (t: Throwable) {
-                TaskExecutionResult.failure(
-                    exitCode = -1,
-                    errorCode = "WASM_TRAP",
-                    errorMessage = "WASM execution trap or unhandled exception: ${t.message ?: t.javaClass.simpleName}"
-                )
             }
-        }
-
-        val result = withTimeoutOrNull(timeoutMillis) {
-            deferred.await()
-        }
-
-        return if (result == null) {
-            deferred.cancel()
+        } catch (e: TimeoutCancellationException) {
+            if (callerJob?.isActive == false) {
+                throw CancellationException("WASM execution cancelled", e)
+            }
             TaskExecutionResult.failure(
                 exitCode = -1,
                 errorCode = "TIMEOUT",
                 errorMessage = "Execution exceeded timeout of ${timeoutSeconds}s"
             )
-        } else {
-            result
         }
     }
 
@@ -112,12 +135,14 @@ class WasmComputeEngine(
      * @param bytecode raw WebAssembly binary bytecode payload.
      * @param envVars environment variables to inject into WASI runtime environment.
      * @param entrypoint exported function name to invoke (defaults to _start or main).
+     * @param executionJob active coroutine job used to signal cooperative cancellation.
      * @return TaskExecutionResult with captured stdout, stderr, and exit status.
      */
     private fun executeWasmInMemory(
         bytecode: ByteString,
         envVars: Map<String, String>,
-        entrypoint: String
+        entrypoint: String,
+        executionJob: Job? = null
     ): TaskExecutionResult {
         val stdoutStream = ByteArrayOutputStream()
         val stderrStream = ByteArrayOutputStream()
@@ -158,15 +183,35 @@ class WasmComputeEngine(
             false
         }
 
-        // Instantiate WASM module instance with WASI host functions
+        val cancelled = AtomicBoolean(false)
+        val workerThread = AtomicReference<Thread?>(null)
+        val completionHandle = executionJob?.invokeOnCompletion { cause ->
+            if (cause != null) {
+                cancelled.set(true)
+                workerThread.get()?.interrupt()
+            }
+        }
+        var instructionCount = 0
+        val listener = ExecutionListener { _: Instruction, _: MStack ->
+            instructionCount++
+            if ((instructionCount and 0x3FF) == 0 &&
+                (cancelled.get() || executionJob?.isActive == false || Thread.currentThread().isInterrupted)
+            ) {
+                throw WasmCancelledTrap()
+            }
+        }
+
+        // Instantiate WASM module instance with WASI host functions and cooperative listener
         val instance = try {
             val builder = Instance.builder(module)
                 .withStart(false)
+                .withUnsafeExecutionListener(listener)
             if (hasImports) {
                 builder.withImportValues(store.toImportValues())
             }
             builder.build()
         } catch (t: Throwable) {
+            completionHandle?.dispose()
             return TaskExecutionResult.failure(
                 exitCode = -1,
                 errorCode = "WASM_TRAP",
@@ -211,6 +256,7 @@ class WasmComputeEngine(
             ?: longArrayOf()
 
         return try {
+            workerThread.set(Thread.currentThread())
             val results = if (args.isNotEmpty()) {
                 func.apply(*args)
             } else {
@@ -233,6 +279,9 @@ class WasmComputeEngine(
                 stderrBytes = stderrBytes
             )
         } catch (t: Throwable) {
+            if (t is WasmCancelledTrap || t.cause is WasmCancelledTrap) {
+                throw CancellationException("WASM execution cancelled", t)
+            }
             val stdoutBytes = stdoutStream.toByteArray()
             val stderrBytes = stderrStream.toByteArray()
             val wasiExit = findWasiExitException(t)
@@ -268,6 +317,9 @@ class WasmComputeEngine(
                     errorMessage = errorMsg
                 )
             }
+        } finally {
+            workerThread.set(null)
+            completionHandle?.dispose()
         }
     }
 
