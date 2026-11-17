@@ -2,7 +2,7 @@ package com.androgrid.worker.engine
 
 import com.androgrid.worker.contract.ContractConstants
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
@@ -66,52 +66,73 @@ interface ShellProcessRunner {
  * Traces to: [INV-006], [NFR-PERF-001]
  */
 class StandardShellProcessRunner(
-    private val maxStreamSizeBytes: Int = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt()
+    private val maxStreamSizeBytes: Int = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt(),
+    private val onProcessStarted: ((Process) -> Unit)? = null
 ) : ShellProcessRunner {
 
     override suspend fun runProcess(
         command: List<String>,
         environment: Map<String, String>,
         timeoutSeconds: Long
-    ): ProcessOutput = withContext(Dispatchers.IO) {
+    ): ProcessOutput = runInterruptible(Dispatchers.IO) {
         val processBuilder = ProcessBuilder(command)
         val env = processBuilder.environment()
         environment.forEach { (k, v) -> env[k] = v }
 
         val process = processBuilder.start()
+        onProcessStarted?.invoke(process)
 
         val stdoutStream = ByteArrayOutputStream()
         val stderrStream = ByteArrayOutputStream()
 
-        val stdoutDrainer = Thread { drainStream(process.inputStream, stdoutStream) }
-        val stderrDrainer = Thread { drainStream(process.errorStream, stderrStream) }
+        val stdoutDrainer = Thread { drainStream(process.inputStream, stdoutStream) }.apply {
+            isDaemon = true
+        }
+        val stderrDrainer = Thread { drainStream(process.errorStream, stderrStream) }.apply {
+            isDaemon = true
+        }
 
         stdoutDrainer.start()
         stderrDrainer.start()
 
-        val effectiveTimeout = if (timeoutSeconds > 0) timeoutSeconds else 180L
-        val finishedInTime = process.waitFor(effectiveTimeout, TimeUnit.SECONDS)
+        try {
+            val effectiveTimeout = if (timeoutSeconds > 0) timeoutSeconds else 180L
+            val finishedInTime = process.waitFor(effectiveTimeout, TimeUnit.SECONDS)
 
-        if (!finishedInTime) {
-            process.destroyForcibly()
-            stdoutDrainer.join(200)
-            stderrDrainer.join(200)
-            return@withContext ProcessOutput(
-                exitCode = -1,
+            if (!finishedInTime) {
+                process.destroyForcibly()
+                stdoutDrainer.join(200)
+                stderrDrainer.join(200)
+                return@runInterruptible ProcessOutput(
+                    exitCode = -1,
+                    stdoutBytes = stdoutStream.toByteArray(),
+                    stderrBytes = "Process exceeded timeout of ${effectiveTimeout}s and was forcibly terminated"
+                        .toByteArray(Charsets.UTF_8)
+                )
+            }
+
+            stdoutDrainer.join(500)
+            stderrDrainer.join(500)
+
+            ProcessOutput(
+                exitCode = process.exitValue(),
                 stdoutBytes = stdoutStream.toByteArray(),
-                stderrBytes = "Process exceeded timeout of ${effectiveTimeout}s and was forcibly terminated"
-                    .toByteArray(Charsets.UTF_8)
+                stderrBytes = stderrStream.toByteArray()
             )
+        } finally {
+            val wasInterrupted = Thread.interrupted()
+            try {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                }
+                runCatching { stdoutDrainer.join(200) }
+                runCatching { stderrDrainer.join(200) }
+            } finally {
+                if (wasInterrupted) {
+                    Thread.currentThread().interrupt()
+                }
+            }
         }
-
-        stdoutDrainer.join(500)
-        stderrDrainer.join(500)
-
-        ProcessOutput(
-            exitCode = process.exitValue(),
-            stdoutBytes = stdoutStream.toByteArray(),
-            stderrBytes = stderrStream.toByteArray()
-        )
     }
 
     private fun drainStream(inputStream: InputStream, outputStream: ByteArrayOutputStream) {
