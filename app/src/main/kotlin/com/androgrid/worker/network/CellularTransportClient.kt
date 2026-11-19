@@ -15,6 +15,7 @@ import com.google.protobuf.ByteString
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocketFactory
@@ -225,10 +226,16 @@ class CellularTransportClient(
                     } finally {
                         client.connectionPool.evictAll()
                         client.dispatcher.executorService.shutdownNow()
-                        client.dispatcher.executorService.awaitTermination(
-                            ContractConstants.RADIO_SLEEP_TERMINATION_DEADLINE_MS,
-                            TimeUnit.MILLISECONDS
-                        )
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            try {
+                                client.dispatcher.executorService.awaitTermination(
+                                    ContractConstants.RADIO_SLEEP_TERMINATION_DEADLINE_MS,
+                                    TimeUnit.MILLISECONDS
+                                )
+                            } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                            }
+                        }
                     }
                 }
             }
