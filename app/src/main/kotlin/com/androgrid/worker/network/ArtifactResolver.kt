@@ -323,6 +323,11 @@ class ArtifactResolver(
                 )
             } catch (e: BlobHttpException) {
                 return mapHttpError(e)
+            } catch (e: IllegalArgumentException) {
+                return ArtifactResolution.TerminalFailure(
+                    errorCode = "PAYLOAD_CORRUPT",
+                    errorMessage = e.message ?: "Invalid blob URL"
+                )
             } catch (e: Exception) {
                 return ArtifactResolution.TransientError(e)
             }
@@ -336,7 +341,7 @@ class ArtifactResolver(
                 )
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 return mapRpcError(e)
             }
             response.wasmBytecode
