@@ -360,6 +360,7 @@ class ArtifactResolverTest {
         val server = MockWebServer()
         server.useHttps(fixture.serverSocketFactory, false)
         server.protocols = listOf(okhttp3.Protocol.HTTP_1_1)
+        val payload = "chunked-wasm-module".toByteArray()
         val sha = sha256Hex(payload)
         server.enqueue(
             MockResponse()
