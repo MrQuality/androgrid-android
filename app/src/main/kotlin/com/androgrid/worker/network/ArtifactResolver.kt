@@ -6,6 +6,7 @@ import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.TaskSpec
 import com.androgrid.worker.contract.ContractConstants
 import com.google.protobuf.ByteString
+import com.google.protobuf.UnsafeByteOperations
 import io.grpc.Status
 import io.grpc.StatusException
 import io.grpc.StatusRuntimeException
@@ -14,13 +15,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
+import okhttp3.ConnectionSpec
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.TlsVersion
+import okhttp3.internal.tls.OkHostnameVerifier
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.HttpsURLConnection
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -114,11 +118,21 @@ class BlobPayloadException(
  */
 object OkHttpBlobFetcher {
 
+    private val TLS_13_CONNECTION_SPEC: ConnectionSpec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+        .tlsVersions(TlsVersion.TLS_1_3)
+        .cipherSuites(*MtlsContext.TLS_13_CIPHERS)
+        .build()
+
+    /** Returns `true` when [host] refers to emulator or local loopback. */
+    fun isLoopbackHost(host: String): Boolean =
+        host == "10.0.2.2" || host == "127.0.0.1" || host == "localhost"
+
     /**
-     * Builds an [OkHttpClient] pinned to [mtlsContext].
+     * Builds an [OkHttpClient] pinned to [mtlsContext] and strict TLS 1.3 cipher suites.
      *
      * @param mtlsContext configured client/CA SSL context.
-     * @param allowLocalhostLoopback permits SAN `"localhost"` when connecting via `10.0.2.2` / `127.0.0.1`.
+     * @param allowLocalhostLoopback verifies loopback hosts (`10.0.2.2` / `127.0.0.1` / `localhost`)
+     *   against the `"localhost"` SAN using [OkHostnameVerifier].
      * @param ephemeralPool disables keep-alive pooling for `[NFR-POW-001]` cellular teardown.
      */
     fun buildMtlsClient(
@@ -128,14 +142,19 @@ object OkHttpBlobFetcher {
     ): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .sslSocketFactory(mtlsContext.socketFactory, mtlsContext.trustManager)
+            .connectionSpecs(listOf(TLS_13_CONNECTION_SPEC))
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
         if (ephemeralPool) {
             builder.connectionPool(ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
         }
         if (allowLocalhostLoopback) {
-            val defaultVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
             builder.hostnameVerifier { hostname, session ->
-                hostname == "10.0.2.2" || hostname == "127.0.0.1" || hostname == "localhost" ||
-                    defaultVerifier.verify(hostname, session)
+                val targetHost = if (isLoopbackHost(hostname)) "localhost" else hostname
+                OkHostnameVerifier.verify(targetHost, session)
             }
         }
         return builder.build()
@@ -144,15 +163,18 @@ object OkHttpBlobFetcher {
     /**
      * Downloads a blob from [url] using [client], respecting coroutine cancellation and `[NFR-PERF-001]` bounds.
      *
+     * @throws IllegalArgumentException if [url] is not HTTPS.
      * @throws BlobHttpException on non-2xx HTTP responses.
-     * @throws BlobPayloadException on empty, oversized, or truncated payloads.
+     * @throws BlobPayloadException on empty, oversized, mismatched, or truncated payloads.
      */
     suspend fun fetch(
         client: OkHttpClient,
         url: String,
         maxBytes: Int = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt()
     ): ByteArray = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(url).get().build()
+        val parsedUrl = url.toHttpUrl()
+        require(parsedUrl.isHttps) { "Blob URL must use HTTPS [INV-002]" }
+        val request = Request.Builder().url(parsedUrl).get().build()
         val call = client.newCall(request)
         suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation { call.cancel() }
@@ -169,13 +191,25 @@ object OkHttpBlobFetcher {
 
                     val body = response.body
                         ?: throw BlobPayloadException("PAYLOAD_CORRUPT", "Missing HTTP response body")
-                    val headerSize = response.header("X-Artifact-Size")?.toLongOrNull()
+                    val rawHeaderSize = response.header("X-Artifact-Size")
+                    val headerSize = if (rawHeaderSize != null) {
+                        rawHeaderSize.toLongOrNull()
+                            ?: throw BlobPayloadException("PAYLOAD_CORRUPT", "Malformed X-Artifact-Size header")
+                    } else {
+                        null
+                    }
                     val contentLength = body.contentLength().takeIf { it >= 0L }
+                    if (headerSize != null && contentLength != null && headerSize != contentLength) {
+                        throw BlobPayloadException(
+                            "PAYLOAD_CORRUPT",
+                            "Mismatched X-Artifact-Size ($headerSize) and Content-Length ($contentLength)"
+                        )
+                    }
                     val expectedSize = headerSize ?: contentLength
 
                     val resultBytes = if (expectedSize != null) {
-                        if (expectedSize == 0L) {
-                            throw BlobPayloadException("PAYLOAD_CORRUPT", "Blob payload must not be empty")
+                        if (expectedSize <= 0L) {
+                            throw BlobPayloadException("PAYLOAD_CORRUPT", "Blob payload size must be positive")
                         }
                         if (expectedSize > maxBytes.toLong()) {
                             throw BlobPayloadException(
@@ -230,9 +264,9 @@ object OkHttpBlobFetcher {
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (t: Throwable) {
+            } catch (e: Exception) {
                 if (cont.isActive) {
-                    cont.resumeWithException(t)
+                    cont.resumeWithException(e)
                 }
             }
         }
@@ -279,7 +313,7 @@ class ArtifactResolver(
 
         val bytes = if (blobFetcher != null) {
             try {
-                ByteString.copyFrom(blobFetcher(expectedSha))
+                UnsafeByteOperations.unsafeWrap(blobFetcher(expectedSha))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: BlobPayloadException) {
@@ -289,7 +323,7 @@ class ArtifactResolver(
                 )
             } catch (e: BlobHttpException) {
                 return mapHttpError(e)
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 return ArtifactResolution.TransientError(e)
             }
         } else {
@@ -339,7 +373,7 @@ class ArtifactResolver(
     private fun mapHttpError(e: BlobHttpException): ArtifactResolution {
         val detail = e.message ?: "HTTP ${e.statusCode}"
         return when (e.statusCode) {
-            404 -> ArtifactResolution.TerminalFailure(
+            404, 410 -> ArtifactResolution.TerminalFailure(
                 errorCode = "ARTIFACT_NOT_FOUND",
                 errorMessage = detail
             )
