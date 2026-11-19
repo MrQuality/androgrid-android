@@ -34,6 +34,7 @@ import com.androgrid.worker.engine.TaskExecutionDispatcher
 import com.androgrid.worker.network.ArtifactResolution
 import com.androgrid.worker.network.ArtifactResolver
 import com.androgrid.worker.network.DefaultMtlsSocketFactoryProvider
+import com.androgrid.worker.network.OkHttpBlobFetcher
 import com.androgrid.worker.network.SharedPreferencesClusterSettingsRepository
 import com.androgrid.worker.network.WifiSyncClient
 import com.androgrid.worker.telemetry.AndroidDeviceThermalStatusListener
@@ -91,6 +92,7 @@ class WorkerForegroundService : Service() {
     private var syncJob: Job? = null
 
     private var wifiClient: WifiSyncClient? = null
+    private var wifiBlobClient: okhttp3.OkHttpClient? = null
     private val completedReports = ConcurrentLinkedQueue<TaskExecutionReport>()
     private val inFlightTasks = ConcurrentHashMap.newKeySet<String>()
     internal val activeJobs = ConcurrentHashMap<String, Job>()
@@ -132,6 +134,8 @@ class WorkerForegroundService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopSyncLoop()
+        wifiBlobClient?.dispatcher?.executorService?.shutdown()
+        wifiBlobClient = null
         serviceJob.cancel()
     }
 
@@ -223,6 +227,18 @@ class WorkerForegroundService : Service() {
                     )
                     val activeAliasRef = AtomicReference(initialAlias)
                     wifiClient = activeClientRef.get()
+                    val activeBlobClientRef = AtomicReference<okhttp3.OkHttpClient?>(
+                        if (settings.hasMtlsCredentials) {
+                            OkHttpBlobFetcher.buildMtlsClient(
+                                mtlsContext = mtlsContext,
+                                allowLocalhostLoopback = authority != null,
+                                ephemeralPool = false
+                            )
+                        } else {
+                            null
+                        }
+                    )
+                    wifiBlobClient = activeBlobClientRef.get()
 
                     val nodeId = NodeIdProvider.getOrCreateNodeId(applicationContext)
                     val batteryProvider = AndroidBatteryStatusProvider(applicationContext)
@@ -280,6 +296,24 @@ class WorkerForegroundService : Service() {
                             artifactResolver = artifactResolver,
                             nodeId = nodeId,
                             activeJobs = activeJobs,
+                            blobFetcher = if (settings.hasMtlsCredentials) {
+                                { sha ->
+                                    val genAlias = activeAliasRef.get()
+                                    val httpClient = activeBlobClientRef.get()
+                                        ?: throw IllegalStateException("Wi-Fi blob OkHttpClient not initialized")
+                                    lifecycleManager.acquireGeneration(genAlias)
+                                    try {
+                                        OkHttpBlobFetcher.fetch(
+                                            httpClient,
+                                            "https://${settings.wifiHost}:${settings.wifiPort}/v1/blobs/$sha"
+                                        )
+                                    } finally {
+                                        lifecycleManager.releaseGeneration(genAlias)
+                                    }
+                                }
+                            } else {
+                                null
+                            },
                             fetchArtifactRpc = { req ->
                                 val genAlias = activeAliasRef.get()
                                 val clientForFetch = activeClientRef.get()!!
@@ -354,7 +388,19 @@ class WorkerForegroundService : Service() {
                                     activeClientRef.set(candidateClient)
                                     activeAliasRef.set(renewalOutcome.newAlias)
                                     wifiClient = candidateClient
+                                    val newBlobClient = OkHttpBlobFetcher.buildMtlsClient(
+                                        mtlsContext = lifecycleManager.createCandidateMtlsContext(
+                                            renewalOutcome.newAlias,
+                                            currentSettings.caCertPem
+                                        ),
+                                        allowLocalhostLoopback = authority != null,
+                                        ephemeralPool = false
+                                    )
+                                    val oldBlobClient = activeBlobClientRef.getAndSet(newBlobClient)
+                                    wifiBlobClient = newBlobClient
                                     serviceScope.launch {
+                                        oldBlobClient?.connectionPool?.evictAll()
+                                        oldBlobClient?.dispatcher?.executorService?.shutdown()
                                         oldClient.shutdown(500L)
                                         lifecycleManager.releaseGeneration(oldAlias)
                                     }
@@ -397,6 +443,7 @@ class WorkerForegroundService : Service() {
     private fun stopSyncLoop() {
         syncJob?.cancel()
         syncJob = null
+        wifiBlobClient?.connectionPool?.evictAll()
         val clientToClose = wifiClient
         wifiClient = null
         if (clientToClose != null) {
@@ -443,6 +490,7 @@ internal class WifiSyncTaskProcessor(
     private val artifactResolver: ArtifactResolver = ArtifactResolver(),
     private val nodeId: String,
     private val activeJobs: ConcurrentHashMap<String, Job> = ConcurrentHashMap(),
+    private val blobFetcher: (suspend (String) -> ByteArray)? = null,
     private val fetchArtifactRpc: (suspend (FetchArtifactRequest) -> FetchArtifactResponse)? = null
 ) {
     /**
@@ -504,7 +552,7 @@ internal class WifiSyncTaskProcessor(
             try {
                 priorJobDeferred.await()?.cancelAndJoin()
                 val resolvedTask = when (
-                    val resolution = artifactResolver.resolve(desiredTask, nodeId) { req ->
+                    val resolution = artifactResolver.resolve(desiredTask, nodeId, blobFetcher) { req ->
                         val rpc = fetchArtifactRpc
                             ?: throw IllegalStateException("FetchArtifact RPC not configured")
                         rpc.invoke(req)

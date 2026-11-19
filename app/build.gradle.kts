@@ -105,6 +105,7 @@ dependencies {
 
     // gRPC & Protobuf Lite
     implementation("io.grpc:grpc-okhttp:1.64.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.grpc:grpc-protobuf-lite:1.64.0")
     implementation("io.grpc:grpc-kotlin-stub:1.4.1")
     implementation("com.google.protobuf:protobuf-javalite:3.25.1")

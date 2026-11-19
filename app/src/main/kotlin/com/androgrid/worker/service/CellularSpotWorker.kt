@@ -244,7 +244,8 @@ class CellularSpotWorker(
             ingressHost = settings.cellularHost,
             ingressPort = settings.cellularPort,
             sslSocketFactory = mtlsContext.socketFactory,
-            artifactResolver = artifactResolver
+            artifactResolver = artifactResolver,
+            mtlsContext = mtlsContext
         )
         try {
             // Evaluate in-band renewal before claiming a task; if candidate trial claims a task,
@@ -261,7 +262,8 @@ class CellularSpotWorker(
                         ingressHost = settings.cellularHost,
                         ingressPort = settings.cellularPort,
                         sslSocketFactory = candidateContext.socketFactory,
-                        artifactResolver = artifactResolver
+                        artifactResolver = artifactResolver,
+                        mtlsContext = candidateContext
                     )
                     val battery = batteryProvider.getBatteryStatus()
                     val caps = capabilityProvider.buildCapabilities(
@@ -295,7 +297,8 @@ class CellularSpotWorker(
                 ingressHost = latestSettings.cellularHost,
                 ingressPort = latestSettings.cellularPort,
                 sslSocketFactory = latestMtls.socketFactory,
-                artifactResolver = artifactResolver
+                artifactResolver = artifactResolver,
+                mtlsContext = latestMtls
             )
 
             val workerLogic = CellularSpotWorkerLogic(

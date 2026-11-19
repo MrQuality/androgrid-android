@@ -121,7 +121,9 @@ class CellularTransportClient(
     private val ingressPort: Int = 443,
     private val rpcInvoker: CellularRpcInvoker = DefaultCellularRpcInvoker(),
     private val sslSocketFactory: SSLSocketFactory? = null,
-    private val artifactResolver: ArtifactResolver = ArtifactResolver()
+    private val artifactResolver: ArtifactResolver = ArtifactResolver(),
+    private val mtlsContext: MtlsContext? = null,
+    private val blobFetcher: (suspend (String) -> ByteArray)? = null
 ) {
 
     /**
@@ -211,8 +213,29 @@ class CellularTransportClient(
                 return CellularClaimOutcome.NoTask
             }
             val claimedTask = claimResponse.task
+            val effectiveBlobFetcher: (suspend (String) -> ByteArray)? = blobFetcher ?: mtlsContext?.let { ctx ->
+                { sha256 ->
+                    val client = OkHttpBlobFetcher.buildMtlsClient(
+                        mtlsContext = ctx,
+                        allowLocalhostLoopback = ingressHost == "10.0.2.2" ||
+                            ingressHost == "127.0.0.1" ||
+                            ingressHost == "localhost",
+                        ephemeralPool = true
+                    )
+                    try {
+                        OkHttpBlobFetcher.fetch(client, "https://$ingressHost:$ingressPort/v1/blobs/$sha256")
+                    } finally {
+                        client.connectionPool.evictAll()
+                        client.dispatcher.executorService.shutdown()
+                    }
+                }
+            }
             when (
-                val resolution = artifactResolver.resolve(claimedTask, request.nodeId) { fetchReq ->
+                val resolution = artifactResolver.resolve(
+                    claimedTask,
+                    request.nodeId,
+                    effectiveBlobFetcher
+                ) { fetchReq ->
                     rpcInvoker.invokeFetchArtifact(channel, fetchReq)
                 }
             ) {
