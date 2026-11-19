@@ -15,6 +15,7 @@ import com.google.protobuf.ByteString
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocketFactory
@@ -121,7 +122,9 @@ class CellularTransportClient(
     private val ingressPort: Int = 443,
     private val rpcInvoker: CellularRpcInvoker = DefaultCellularRpcInvoker(),
     private val sslSocketFactory: SSLSocketFactory? = null,
-    private val artifactResolver: ArtifactResolver = ArtifactResolver()
+    private val artifactResolver: ArtifactResolver = ArtifactResolver(),
+    private val mtlsContext: MtlsContext? = null,
+    private val blobFetcher: (suspend (String) -> ByteArray)? = null
 ) {
 
     /**
@@ -211,8 +214,37 @@ class CellularTransportClient(
                 return CellularClaimOutcome.NoTask
             }
             val claimedTask = claimResponse.task
+            val effectiveBlobFetcher: (suspend (String) -> ByteArray)? = blobFetcher ?: mtlsContext?.let { ctx ->
+                { sha256 ->
+                    val client = OkHttpBlobFetcher.buildMtlsClient(
+                        mtlsContext = ctx,
+                        allowLocalhostLoopback = OkHttpBlobFetcher.isLoopbackHost(ingressHost),
+                        ephemeralPool = true
+                    )
+                    try {
+                        OkHttpBlobFetcher.fetch(client, "https://$ingressHost:$ingressPort/v1/blobs/$sha256")
+                    } finally {
+                        client.connectionPool.evictAll()
+                        client.dispatcher.executorService.shutdownNow()
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            try {
+                                client.dispatcher.executorService.awaitTermination(
+                                    ContractConstants.RADIO_SLEEP_TERMINATION_DEADLINE_MS,
+                                    TimeUnit.MILLISECONDS
+                                )
+                            } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                            }
+                        }
+                    }
+                }
+            }
             when (
-                val resolution = artifactResolver.resolve(claimedTask, request.nodeId) { fetchReq ->
+                val resolution = artifactResolver.resolve(
+                    claimedTask,
+                    request.nodeId,
+                    effectiveBlobFetcher
+                ) { fetchReq ->
                     rpcInvoker.invokeFetchArtifact(channel, fetchReq)
                 }
             ) {

@@ -101,6 +101,7 @@ class StandardShellProcessRunner(
 
             if (!finishedInTime) {
                 process.destroyForcibly()
+                runCatching { process.waitFor(500, TimeUnit.MILLISECONDS) }
                 stdoutDrainer.join(200)
                 stderrDrainer.join(200)
                 return@runInterruptible ProcessOutput(
@@ -124,6 +125,7 @@ class StandardShellProcessRunner(
             try {
                 if (process.isAlive) {
                     process.destroyForcibly()
+                    runCatching { process.waitFor(500, TimeUnit.MILLISECONDS) }
                 }
                 runCatching { stdoutDrainer.join(200) }
                 runCatching { stderrDrainer.join(200) }

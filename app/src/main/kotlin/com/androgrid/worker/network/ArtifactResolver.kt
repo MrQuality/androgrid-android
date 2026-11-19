@@ -6,10 +6,27 @@ import com.androgrid.v1.FetchArtifactResponse
 import com.androgrid.v1.TaskSpec
 import com.androgrid.worker.contract.ContractConstants
 import com.google.protobuf.ByteString
+import com.google.protobuf.UnsafeByteOperations
 import io.grpc.Status
 import io.grpc.StatusException
 import io.grpc.StatusRuntimeException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
+import okhttp3.ConnectionSpec
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.TlsVersion
+import okhttp3.internal.tls.OkHostnameVerifier
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Bounded, byte-weighted in-memory LRU cache for verified WebAssembly modules.
@@ -78,8 +95,188 @@ sealed class ArtifactResolution {
 }
 
 /**
+ * Exception thrown by [OkHttpBlobFetcher] on non-2xx HTTP responses from `/v1/blobs/{sha256}`.
+ */
+class BlobHttpException(
+    val statusCode: Int,
+    message: String
+) : IOException(message)
+
+/**
+ * Exception thrown by [OkHttpBlobFetcher] when streamed blob size or framing violates bounds.
+ */
+class BlobPayloadException(
+    val errorCode: String,
+    message: String
+) : IOException(message)
+
+/**
+ * Shared mTLS HTTP/2 `/v1/blobs/{sha256}` downloader enforcing `[NFR-PERF-001]` bounds,
+ * stream truncation detection, and cooperative `Call.cancel()`.
+ *
+ * Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003], [REQ-VER-003]
+ */
+object OkHttpBlobFetcher {
+
+    private val TLS_13_CONNECTION_SPEC: ConnectionSpec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+        .tlsVersions(TlsVersion.TLS_1_3)
+        .cipherSuites(*MtlsContext.TLS_13_CIPHERS)
+        .build()
+
+    /** Returns `true` when [host] refers to emulator or local loopback. */
+    fun isLoopbackHost(host: String): Boolean =
+        host == "10.0.2.2" || host == "127.0.0.1" || host == "localhost"
+
+    /**
+     * Builds an [OkHttpClient] pinned to [mtlsContext] and strict TLS 1.3 cipher suites.
+     *
+     * @param mtlsContext configured client/CA SSL context.
+     * @param allowLocalhostLoopback verifies loopback hosts (`10.0.2.2` / `127.0.0.1` / `localhost`)
+     *   against the `"localhost"` SAN using [OkHostnameVerifier].
+     * @param ephemeralPool disables keep-alive pooling for `[NFR-POW-001]` cellular teardown.
+     */
+    fun buildMtlsClient(
+        mtlsContext: MtlsContext,
+        allowLocalhostLoopback: Boolean = false,
+        ephemeralPool: Boolean = false
+    ): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .sslSocketFactory(mtlsContext.socketFactory, mtlsContext.trustManager)
+            .connectionSpecs(listOf(TLS_13_CONNECTION_SPEC))
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
+        if (ephemeralPool) {
+            builder.connectionPool(ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
+        }
+        if (allowLocalhostLoopback) {
+            builder.hostnameVerifier { hostname, session ->
+                val targetHost = if (isLoopbackHost(hostname)) "localhost" else hostname
+                OkHostnameVerifier.verify(targetHost, session)
+            }
+        }
+        return builder.build()
+    }
+
+    /**
+     * Downloads a blob from [url] using [client], respecting coroutine cancellation and `[NFR-PERF-001]` bounds.
+     *
+     * @throws IllegalArgumentException if [url] is not HTTPS.
+     * @throws BlobHttpException on non-2xx HTTP responses.
+     * @throws BlobPayloadException on empty, oversized, mismatched, or truncated payloads.
+     */
+    suspend fun fetch(
+        client: OkHttpClient,
+        url: String,
+        maxBytes: Int = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt()
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val parsedUrl = url.toHttpUrl()
+        require(parsedUrl.isHttps) { "Blob URL must use HTTPS [INV-002]" }
+        val request = Request.Builder().url(parsedUrl).get().build()
+        val call = client.newCall(request)
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val err = BlobHttpException(
+                            response.code,
+                            "HTTP ${response.code} fetching blob"
+                        )
+                        if (cont.isActive) cont.resumeWithException(err)
+                        return@suspendCancellableCoroutine
+                    }
+
+                    val body = response.body
+                        ?: throw BlobPayloadException("PAYLOAD_CORRUPT", "Missing HTTP response body")
+                    val rawHeaderSize = response.header("X-Artifact-Size")
+                    val headerSize = if (rawHeaderSize != null) {
+                        rawHeaderSize.toLongOrNull()
+                            ?: throw BlobPayloadException("PAYLOAD_CORRUPT", "Malformed X-Artifact-Size header")
+                    } else {
+                        null
+                    }
+                    val contentLength = body.contentLength().takeIf { it >= 0L }
+                    if (headerSize != null && contentLength != null && headerSize != contentLength) {
+                        throw BlobPayloadException(
+                            "PAYLOAD_CORRUPT",
+                            "Mismatched X-Artifact-Size ($headerSize) and Content-Length ($contentLength)"
+                        )
+                    }
+                    val expectedSize = headerSize ?: contentLength
+
+                    val resultBytes = if (expectedSize != null) {
+                        if (expectedSize <= 0L) {
+                            throw BlobPayloadException("PAYLOAD_CORRUPT", "Blob payload size must be positive")
+                        }
+                        if (expectedSize > maxBytes.toLong()) {
+                            throw BlobPayloadException(
+                                "PAYLOAD_TOO_LARGE",
+                                "Blob size ($expectedSize bytes) exceeds $maxBytes byte limit [NFR-PERF-001]"
+                            )
+                        }
+                        val target = expectedSize.toInt()
+                        val buffer = ByteArray(target)
+                        var totalRead = 0
+                        body.byteStream().use { input ->
+                            while (totalRead < target) {
+                                val read = input.read(buffer, totalRead, target - totalRead)
+                                if (read < 0) break
+                                totalRead += read
+                            }
+                            if (totalRead != target || input.read() != -1) {
+                                throw BlobPayloadException(
+                                    "PAYLOAD_CORRUPT",
+                                    "Truncated or mismatched stream: expected $target bytes, read $totalRead"
+                                )
+                            }
+                        }
+                        buffer
+                    } else {
+                        val out = ByteArrayOutputStream()
+                        val chunk = ByteArray(8192)
+                        var totalRead = 0
+                        body.byteStream().use { input ->
+                            while (true) {
+                                val read = input.read(chunk)
+                                if (read < 0) break
+                                totalRead += read
+                                if (totalRead > maxBytes) {
+                                    throw BlobPayloadException(
+                                        "PAYLOAD_TOO_LARGE",
+                                        "Chunked blob exceeded $maxBytes byte limit [NFR-PERF-001]"
+                                    )
+                                }
+                                out.write(chunk, 0, read)
+                            }
+                        }
+                        if (totalRead == 0) {
+                            throw BlobPayloadException("PAYLOAD_CORRUPT", "Blob payload must not be empty")
+                        }
+                        out.toByteArray()
+                    }
+
+                    if (cont.isActive) {
+                        cont.resume(resultBytes)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (cont.isActive) {
+                    cont.resumeWithException(e)
+                }
+            }
+        }
+    }
+}
+
+/**
  * Resolves decoupled WASM payloads (`wasm_bytecode` empty + `artifact_sha256` present)
- * at the transport boundary via [ArtifactMemoryCache] and mTLS `FetchArtifact` RPC.
+ * at the transport boundary via [ArtifactMemoryCache], `/v1/blobs/{sha256}` HTTPS fetchers,
+ * or legacy mTLS `FetchArtifact` RPC.
  *
  * Traces to: [INV-002], [INV-003], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003], [REQ-VER-003]
  */
@@ -88,11 +285,12 @@ class ArtifactResolver(
 ) {
     /**
      * Resolves [task] into an executable [TaskSpec] with populated `wasm_bytecode`.
-     * Uses [fetchRpc] only on cache miss, keeping compute engines 100% network-free.
+     * Uses [blobFetcher] when available, falling back to [fetchRpc] only when [blobFetcher] is `null`.
      */
     suspend fun resolve(
         task: TaskSpec,
         nodeId: String,
+        blobFetcher: (suspend (String) -> ByteArray)? = null,
         fetchRpc: suspend (FetchArtifactRequest) -> FetchArtifactResponse
     ): ArtifactResolution {
         if (task.engine != ExecutionEngine.EXECUTION_ENGINE_WASM_WASI || !task.wasmBytecode.isEmpty) {
@@ -113,19 +311,49 @@ class ArtifactResolver(
             )
         }
 
-        val response = try {
-            fetchRpc(
-                FetchArtifactRequest.newBuilder()
-                    .setArtifactSha256(expectedSha)
-                    .setNodeId(nodeId)
-                    .build()
-            )
-        } catch (e: Throwable) {
-            return mapRpcError(e)
+        val bytes = if (blobFetcher != null) {
+            try {
+                UnsafeByteOperations.unsafeWrap(blobFetcher(expectedSha))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: BlobPayloadException) {
+                return ArtifactResolution.TerminalFailure(
+                    errorCode = e.errorCode,
+                    errorMessage = e.message ?: e.errorCode
+                )
+            } catch (e: BlobHttpException) {
+                return mapHttpError(e)
+            } catch (e: IllegalArgumentException) {
+                return ArtifactResolution.TerminalFailure(
+                    errorCode = "PAYLOAD_CORRUPT",
+                    errorMessage = e.message ?: "Invalid blob URL"
+                )
+            } catch (e: Exception) {
+                return ArtifactResolution.TransientError(e)
+            }
+        } else {
+            val response = try {
+                fetchRpc(
+                    FetchArtifactRequest.newBuilder()
+                        .setArtifactSha256(expectedSha)
+                        .setNodeId(nodeId)
+                        .build()
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return mapRpcError(e)
+            }
+            response.wasmBytecode
         }
 
-        val bytes = response.wasmBytecode
         val maxBytes = ContractConstants.MAX_FRAME_SIZE_BYTES.toInt()
+        if (bytes.isEmpty) {
+            return ArtifactResolution.TerminalFailure(
+                errorCode = "PAYLOAD_CORRUPT",
+                errorMessage = "Fetched WASM bytecode must not be empty"
+            )
+        }
         if (bytes.size() > maxBytes) {
             return ArtifactResolution.TerminalFailure(
                 errorCode = "PAYLOAD_TOO_LARGE",
@@ -145,6 +373,29 @@ class ArtifactResolver(
         return ArtifactResolution.Ready(
             task.toBuilder().setWasmBytecode(bytes).build()
         )
+    }
+
+    private fun mapHttpError(e: BlobHttpException): ArtifactResolution {
+        val detail = e.message ?: "HTTP ${e.statusCode}"
+        return when (e.statusCode) {
+            404, 410 -> ArtifactResolution.TerminalFailure(
+                errorCode = "ARTIFACT_NOT_FOUND",
+                errorMessage = detail
+            )
+            401, 403 -> ArtifactResolution.TerminalFailure(
+                errorCode = "AUTH_REJECTED",
+                errorMessage = detail
+            )
+            413 -> ArtifactResolution.TerminalFailure(
+                errorCode = "PAYLOAD_TOO_LARGE",
+                errorMessage = detail
+            )
+            400, 416, 422 -> ArtifactResolution.TerminalFailure(
+                errorCode = "PAYLOAD_CORRUPT",
+                errorMessage = detail
+            )
+            else -> ArtifactResolution.TransientError(e)
+        }
     }
 
     private fun mapRpcError(e: Throwable): ArtifactResolution {

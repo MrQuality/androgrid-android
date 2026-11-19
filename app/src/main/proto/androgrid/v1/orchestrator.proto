@@ -122,7 +122,7 @@ message TaskSpec {
   string shell_command = 8;
   string artifact_sha256 = 9;
   bool requires_unmetered = 10;
-  // Deprecated: workers resolve content-addressed artifacts via FetchArtifact over mTLS 50051.
+  // Deprecated: workers resolve content-addressed artifacts via mTLS 50051 /v1/blobs/{sha256} (or legacy FetchArtifact RPC).
   string artifact_url = 11 [deprecated = true];
 }
 
