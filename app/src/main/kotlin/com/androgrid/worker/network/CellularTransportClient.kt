@@ -217,16 +217,18 @@ class CellularTransportClient(
                 { sha256 ->
                     val client = OkHttpBlobFetcher.buildMtlsClient(
                         mtlsContext = ctx,
-                        allowLocalhostLoopback = ingressHost == "10.0.2.2" ||
-                            ingressHost == "127.0.0.1" ||
-                            ingressHost == "localhost",
+                        allowLocalhostLoopback = OkHttpBlobFetcher.isLoopbackHost(ingressHost),
                         ephemeralPool = true
                     )
                     try {
                         OkHttpBlobFetcher.fetch(client, "https://$ingressHost:$ingressPort/v1/blobs/$sha256")
                     } finally {
                         client.connectionPool.evictAll()
-                        client.dispatcher.executorService.shutdown()
+                        client.dispatcher.executorService.shutdownNow()
+                        client.dispatcher.executorService.awaitTermination(
+                            ContractConstants.RADIO_SLEEP_TERMINATION_DEADLINE_MS,
+                            TimeUnit.MILLISECONDS
+                        )
                     }
                 }
             }
