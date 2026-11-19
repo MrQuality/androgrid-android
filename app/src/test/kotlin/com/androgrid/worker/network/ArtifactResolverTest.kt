@@ -592,16 +592,128 @@ class ArtifactResolverTest {
             assertThat(negResult).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
             assertThat((negResult as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("PAYLOAD_CORRUPT")
 
-            var nonHttpsRejected = false
-            try {
-                OkHttpBlobFetcher.fetch(client, "http://127.0.0.1:${server.port}/v1/blobs/$sha")
-            } catch (_: IllegalArgumentException) {
-                nonHttpsRejected = true
-            }
-            assertThat(nonHttpsRejected).isTrue()
+            val nonHttpsResult = resolver.resolve(
+                task = task,
+                nodeId = testNodeId,
+                blobFetcher = { targetSha ->
+                    OkHttpBlobFetcher.fetch(client, "http://127.0.0.1:${server.port}/v1/blobs/$targetSha")
+                }
+            ) { FetchArtifactResponse.getDefaultInstance() }
+            assertThat(nonHttpsResult).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
+            assertThat((nonHttpsResult as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("PAYLOAD_CORRUPT")
         } finally {
             client.dispatcher.executorService.shutdown()
             server.shutdown()
+        }
+    }
+
+    @Test
+    fun okHttpBlobFetcher_buildMtlsClient_rejectsTls12OnlyServerAndMismatchedSizeHeader() = runTest {
+        val kpg = KeyPairGenerator.getInstance("EC").apply { initialize(256) }
+        val now = System.currentTimeMillis()
+        val notBefore = Date(now - 60_000)
+        val notAfter = Date(now + 86_400_000)
+        val caKp = kpg.generateKeyPair()
+        val caSubject = X500Name("CN=TLS12 Test CA")
+        val caCert = JcaX509CertificateConverter().getCertificate(
+            JcaX509v3CertificateBuilder(caSubject, BigInteger(64, SecureRandom()), notBefore, notAfter, caSubject, caKp.public)
+                .addExtension(Extension.basicConstraints, true, BasicConstraints(true))
+                .addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign))
+                .build(JcaContentSignerBuilder("SHA256withECDSA").build(caKp.private))
+        )
+        val srvKp = kpg.generateKeyPair()
+        val srvCert = JcaX509CertificateConverter().getCertificate(
+            JcaX509v3CertificateBuilder(caSubject, BigInteger(64, SecureRandom()), notBefore, notAfter, X500Name("CN=localhost"), srvKp.public)
+                .addExtension(Extension.basicConstraints, true, BasicConstraints(false))
+                .addExtension(Extension.subjectAlternativeName, false, GeneralNames(GeneralName(GeneralName.dNSName, "localhost")))
+                .addExtension(Extension.extendedKeyUsage, false, ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth))
+                .build(JcaContentSignerBuilder("SHA256withECDSA").build(caKp.private))
+        )
+        val cliKp = kpg.generateKeyPair()
+        val cliCert = JcaX509CertificateConverter().getCertificate(
+            JcaX509v3CertificateBuilder(caSubject, BigInteger(64, SecureRandom()), notBefore, notAfter, X500Name("OU=Edge Compute,CN=worker-01"), cliKp.public)
+                .addExtension(Extension.basicConstraints, true, BasicConstraints(false))
+                .addExtension(Extension.extendedKeyUsage, false, ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth))
+                .build(JcaContentSignerBuilder("SHA256withECDSA").build(caKp.private))
+        )
+        val srvKs = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+            setKeyEntry("server", srvKp.private, CharArray(0), arrayOf<X509Certificate>(srvCert, caCert))
+        }
+        val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(srvKs, CharArray(0))
+        }
+        val tls12Ctx = SSLContext.getInstance("TLSv1.2").apply {
+            init(kmf.keyManagers, null, SecureRandom())
+        }
+        val tls12OnlyFactory = object : SSLSocketFactory() {
+            override fun getDefaultCipherSuites() = tls12Ctx.socketFactory.defaultCipherSuites
+            override fun getSupportedCipherSuites() = tls12Ctx.socketFactory.supportedCipherSuites
+            override fun createSocket(s: java.net.Socket?, host: String?, port: Int, autoClose: Boolean) =
+                (tls12Ctx.socketFactory.createSocket(s, host, port, autoClose) as javax.net.ssl.SSLSocket).apply {
+                    enabledProtocols = arrayOf("TLSv1.2")
+                }
+            override fun createSocket(host: String?, port: Int) = tls12Ctx.socketFactory.createSocket(host, port)
+            override fun createSocket(host: String?, port: Int, localHost: java.net.InetAddress?, localPort: Int) =
+                tls12Ctx.socketFactory.createSocket(host, port, localHost, localPort)
+            override fun createSocket(host: java.net.InetAddress?, port: Int) = tls12Ctx.socketFactory.createSocket(host, port)
+            override fun createSocket(address: java.net.InetAddress?, port: Int, localAddress: java.net.InetAddress?, localPort: Int) =
+                tls12Ctx.socketFactory.createSocket(address, port, localAddress, localPort)
+        }
+        val tls12Server = MockWebServer()
+        tls12Server.useHttps(tls12OnlyFactory, false)
+        tls12Server.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
+        tls12Server.start()
+        val clientMtls = DefaultMtlsSocketFactoryProvider.createMtlsContextFromPem(
+            caCertPem = toPem("CERTIFICATE", caCert.encoded),
+            clientCertPem = toPem("CERTIFICATE", cliCert.encoded),
+            clientKeyPem = toPem("PRIVATE KEY", cliKp.private.encoded)
+        )
+        val client = OkHttpBlobFetcher.buildMtlsClient(clientMtls, allowLocalhostLoopback = true, ephemeralPool = true)
+        try {
+            var handshakeRejected = false
+            try {
+                OkHttpBlobFetcher.fetch(client, "https://127.0.0.1:${tls12Server.port}/v1/blobs/test")
+            } catch (_: javax.net.ssl.SSLException) {
+                handshakeRejected = true
+            }
+            assertThat(handshakeRejected).isTrue()
+        } finally {
+            tls12Server.shutdown()
+        }
+
+        val fixture = createMtlsTestFixture("localhost")
+        val mismatchServer = MockWebServer()
+        mismatchServer.useHttps(fixture.serverSocketFactory, false)
+        mismatchServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("X-Artifact-Size", "10")
+                .setBody("abcd")
+        )
+        mismatchServer.start()
+        val goodClient = OkHttpBlobFetcher.buildMtlsClient(fixture.clientMtlsContext, allowLocalhostLoopback = true, ephemeralPool = true)
+        try {
+            val resolver = ArtifactResolver(ArtifactMemoryCache())
+            val sha = "d".repeat(64)
+            val task = TaskSpec.newBuilder()
+                .setTaskId("t_mismatch")
+                .setEngine(ExecutionEngine.EXECUTION_ENGINE_WASM_WASI)
+                .setArtifactSha256(sha)
+                .build()
+            val res = resolver.resolve(
+                task = task,
+                nodeId = testNodeId,
+                blobFetcher = { targetSha ->
+                    OkHttpBlobFetcher.fetch(goodClient, "https://127.0.0.1:${mismatchServer.port}/v1/blobs/$targetSha")
+                }
+            ) { FetchArtifactResponse.getDefaultInstance() }
+            assertThat(res).isInstanceOf(ArtifactResolution.TerminalFailure::class.java)
+            assertThat((res as ArtifactResolution.TerminalFailure).errorCode).isEqualTo("PAYLOAD_CORRUPT")
+        } finally {
+            goodClient.dispatcher.executorService.shutdown()
+            client.dispatcher.executorService.shutdown()
+            mismatchServer.shutdown()
         }
     }
 }
